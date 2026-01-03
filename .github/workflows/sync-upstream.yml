@@ -1,0 +1,144 @@
+name: Sync Upstream and Rebase
+
+on:
+  schedule:
+    # 每天 UTC 时间 0 点检查一次 (北京时间早上 8 点)
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+# 要保留的 commit message 特征 (用于 cherry-pick)
+env:
+  KEEP_COMMITS: |
+    ci: add workflow to auto sync upstream
+    feat(antigravity): add web_search support for Claude via Gemini googleSearch
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream --tags
+
+      - name: Check if sync needed
+        id: check
+        run: |
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+
+          # 检查上游 HEAD 是否已经在本地历史中
+          if git merge-base --is-ancestor "$UPSTREAM_HEAD" HEAD; then
+            echo "Already up to date"
+            echo "need_sync=false" >> $GITHUB_OUTPUT
+          else
+            echo "Need to sync"
+            echo "need_sync=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Find commits to preserve
+        id: find_commits
+        run: |
+          echo "Looking for commits to preserve..."
+
+          # 找到要保留的 commit (通过 message 匹配)
+          COMMITS_TO_KEEP=""
+
+          # CI workflow commit
+          CI_COMMIT=$(git log --oneline --grep="ci: add workflow to auto sync upstream" --format="%H" | head -1)
+          if [ -n "$CI_COMMIT" ]; then
+            echo "Found CI commit: $CI_COMMIT"
+            COMMITS_TO_KEEP="$CI_COMMIT"
+          fi
+
+          # web_search commit
+          WS_COMMIT=$(git log --oneline --grep="feat(antigravity): add web_search support for Claude via Gemini googleSearch" --format="%H" | head -1)
+          if [ -n "$WS_COMMIT" ]; then
+            echo "Found web_search commit: $WS_COMMIT"
+            if [ -n "$COMMITS_TO_KEEP" ]; then
+              COMMITS_TO_KEEP="$COMMITS_TO_KEEP $WS_COMMIT"
+            else
+              COMMITS_TO_KEEP="$WS_COMMIT"
+            fi
+          fi
+
+          echo "Commits to preserve: $COMMITS_TO_KEEP"
+          echo "commits=$COMMITS_TO_KEEP" >> $GITHUB_OUTPUT
+
+      - name: Rebase onto upstream
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          # 切到上游 main
+          git checkout upstream/main
+
+          # Cherry-pick 要保留的 commit (按正确顺序: 先 web_search, 后 CI)
+          COMMITS="${{ steps.find_commits.outputs.commits }}"
+
+          # 反转顺序 (因为找到的是新到旧)
+          REVERSED=$(echo $COMMITS | tr ' ' '\n' | tac | tr '\n' ' ')
+
+          for commit in $REVERSED; do
+            echo "Cherry-picking $commit"
+            git cherry-pick "$commit" || {
+              echo "Cherry-pick failed, trying to continue..."
+              git cherry-pick --abort
+              exit 1
+            }
+          done
+
+          # 更新 main 分支
+          git branch -f main HEAD
+          git checkout main
+
+          echo "Rebase completed successfully"
+          git log --oneline -5
+
+      - name: Force push main
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          git push origin main --force-with-lease
+          echo "Pushed to origin/main"
+
+      - name: Check for new upstream tags
+        id: tags
+        run: |
+          # 获取上游最新的 tag
+          LATEST_UPSTREAM_TAG=$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || echo "")
+          echo "Latest upstream tag: $LATEST_UPSTREAM_TAG"
+
+          if [ -z "$LATEST_UPSTREAM_TAG" ]; then
+            echo "No tags found"
+            echo "new_tag=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 检查这个 tag 是否已经在 origin 存在
+          if git ls-remote --tags origin | grep -q "refs/tags/${LATEST_UPSTREAM_TAG}$"; then
+            echo "Tag $LATEST_UPSTREAM_TAG already exists in origin"
+            echo "new_tag=" >> $GITHUB_OUTPUT
+          else
+            echo "New tag found: $LATEST_UPSTREAM_TAG"
+            echo "new_tag=$LATEST_UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create rebased tag
+        if: steps.tags.outputs.new_tag != ''
+        run: |
+          NEW_TAG="${{ steps.tags.outputs.new_tag }}"
+          echo "Creating tag $NEW_TAG on rebased main"
+
+          # 在当前 HEAD (包含你的 commit) 上创建 tag
+          git tag -f "$NEW_TAG"
+          git push origin "$NEW_TAG" --force
+
+          echo "Tag $NEW_TAG pushed to origin"
