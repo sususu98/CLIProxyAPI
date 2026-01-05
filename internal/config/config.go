@@ -143,6 +143,11 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.
+	// When enabled, requests with the same session ID (extracted from metadata.user_id)
+	// are routed to the same auth credential when available.
+	ClaudeCodeSessionAffinity bool `yaml:"claude-code-session-affinity,omitempty" json:"claude-code-session-affinity,omitempty"`
 }
 
 // ModelNameMapping defines a model ID mapping for a specific channel.

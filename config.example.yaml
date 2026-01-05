@@ -73,10 +73,14 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
+  # Enable session-sticky routing for Claude Code clients.
+  # When true, requests with the same session ID (from metadata.user_id) are
+  # routed to the same credential when available. This ensures conversation
+  # continuity when using multiple OAuth accounts.
+  claude-code-session-affinity: false # default: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
-
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.

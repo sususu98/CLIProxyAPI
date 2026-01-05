@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -233,4 +237,57 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+// sessionPattern matches Claude Code user_id format:
+// user_{hash}_account__session_{uuid}
+var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
+
+// SessionAffinitySelector wraps another selector with session-sticky behavior.
+// It extracts session ID from Claude Code requests and uses consistent hashing
+// to route same-session requests to the same auth when available.
+type SessionAffinitySelector struct {
+	fallback Selector
+}
+
+// NewSessionAffinitySelector creates a new session-aware selector.
+func NewSessionAffinitySelector(fallback Selector) *SessionAffinitySelector {
+	return &SessionAffinitySelector{fallback: fallback}
+}
+
+// Pick selects an auth with session affinity when possible.
+func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	sessionID := extractSessionID(opts.OriginalRequest)
+	if sessionID == "" {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+
+	h := fnv.New32a()
+	h.Write([]byte(sessionID))
+	preferredIndex := int(h.Sum32()) % len(available)
+
+	return available[preferredIndex], nil
+}
+
+// extractSessionID parses session UUID from Claude Code metadata.user_id.
+// Format: user_{hash}_account__session_{uuid}
+func extractSessionID(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	userID := gjson.GetBytes(payload, "metadata.user_id").String()
+	if userID == "" {
+		return ""
+	}
+	matches := sessionPattern.FindStringSubmatch(userID)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return ""
 }
