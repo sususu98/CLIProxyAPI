@@ -200,8 +200,10 @@ func (b *Builder) Build() (*Service, error) {
 		}
 
 		strategy := ""
+		sessionAffinity := false
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
+			sessionAffinity = b.cfg.Routing.ClaudeCodeSessionAffinity
 		}
 		var selector coreauth.Selector
 		switch strategy {
@@ -209,6 +211,11 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.FillFirstSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
+		}
+
+		// Wrap with session affinity if enabled
+		if sessionAffinity {
+			selector = coreauth.NewSessionAffinitySelector(selector)
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
