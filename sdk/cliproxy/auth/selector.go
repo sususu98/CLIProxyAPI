@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -233,4 +238,229 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+// sessionPattern matches Claude Code user_id format:
+// user_{hash}_account__session_{uuid}
+var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
+
+// SessionAffinitySelector wraps another selector with session-sticky behavior.
+// It extracts session ID from multiple sources and maintains session-to-auth
+// mappings with automatic failover when the bound auth becomes unavailable.
+type SessionAffinitySelector struct {
+	fallback Selector
+	cache    *SessionCache
+}
+
+// SessionAffinityConfig configures the session affinity selector.
+type SessionAffinityConfig struct {
+	Fallback Selector
+	TTL      time.Duration
+}
+
+// NewSessionAffinitySelector creates a new session-aware selector.
+func NewSessionAffinitySelector(fallback Selector) *SessionAffinitySelector {
+	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+}
+
+// NewSessionAffinitySelectorWithConfig creates a selector with custom configuration.
+func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAffinitySelector {
+	if cfg.Fallback == nil {
+		cfg.Fallback = &RoundRobinSelector{}
+	}
+	if cfg.TTL <= 0 {
+		cfg.TTL = time.Hour
+	}
+	return &SessionAffinitySelector{
+		fallback: cfg.Fallback,
+		cache:    NewSessionCache(cfg.TTL),
+	}
+}
+
+// Pick selects an auth with session affinity when possible.
+// Priority for session ID extraction:
+//  1. metadata.user_id (Claude Code format) - highest priority
+//  2. X-Session-ID header
+//  3. Idempotency-Key from metadata
+//  4. metadata.user_id (non-Claude Code format)
+//  5. conversation_id field
+//  6. Hash-based fallback from messages
+//
+// Note: The cache key includes provider, session ID, and model to handle cases where
+// a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
+// that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if sessionID == "" {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use provider+session+model as cache key to:
+	// 1. Avoid cross-provider conflicts (same session ID may be used with different providers)
+	// 2. Handle multi-model sessions correctly (switching models uses different bindings)
+	// 3. Ensure switching back to a previously used model returns to the same auth
+	cacheKey := provider + "::" + sessionID + "::" + model
+
+	// Check cache for existing binding
+	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		for _, auth := range available {
+			if auth.ID == cachedAuthID {
+				return auth, nil
+			}
+		}
+		// Cached auth is no longer available - auto failover to new auth
+		auth := s.selectByHash(cacheKey, available)
+		s.cache.Set(cacheKey, auth.ID)
+		return auth, nil
+	}
+
+	// No cache hit: select by consistent hash and cache the binding
+	auth := s.selectByHash(cacheKey, available)
+	s.cache.Set(cacheKey, auth.ID)
+	return auth, nil
+}
+
+// selectByHash uses consistent hashing to pick an auth from available list.
+func (s *SessionAffinitySelector) selectByHash(sessionID string, available []*Auth) *Auth {
+	h := fnv.New32a()
+	h.Write([]byte(sessionID))
+	idx := int(h.Sum32()) % len(available)
+	return available[idx]
+}
+
+// Stop releases resources held by the selector.
+func (s *SessionAffinitySelector) Stop() {
+	if s.cache != nil {
+		s.cache.Stop()
+	}
+}
+
+// InvalidateAuth removes all session bindings for a specific auth.
+// Called when an auth becomes rate-limited or unavailable.
+func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
+	if s.cache != nil {
+		s.cache.InvalidateAuth(authID)
+	}
+}
+
+// ExtractSessionID extracts session identifier from multiple sources.
+// Priority order:
+//  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
+//  2. X-Session-ID header
+//  3. Idempotency-Key from metadata
+//  4. metadata.user_id (non-Claude Code format)
+//  5. conversation_id field in request body
+//  6. Stable hash from first few messages content (fallback)
+func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
+	// 1. metadata.user_id with Claude Code session format (highest priority)
+	// Claude Code clients always send user_id with _session_{uuid} format
+	if len(payload) > 0 {
+		userID := gjson.GetBytes(payload, "metadata.user_id").String()
+		if userID != "" {
+			if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+				return "claude:" + matches[1]
+			}
+		}
+	}
+
+	// 2. X-Session-ID header (explicit session binding)
+	if headers != nil {
+		if sid := headers.Get("X-Session-ID"); sid != "" {
+			return "header:" + sid
+		}
+	}
+
+	// 3. Idempotency-Key from metadata (set by handlers)
+	if metadata != nil {
+		if ikey, ok := metadata["idempotency_key"].(string); ok && ikey != "" {
+			return "idem:" + ikey
+		}
+	}
+
+	if len(payload) == 0 {
+		return ""
+	}
+
+	// 4. metadata.user_id (non-Claude Code format, e.g., other API clients)
+	userID := gjson.GetBytes(payload, "metadata.user_id").String()
+	if userID != "" {
+		// Already checked for Claude Code format above, so this is a fallback for other formats
+		return "user:" + userID
+	}
+
+	// 5. conversation_id field (common in chat APIs)
+	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
+		return "conv:" + convID
+	}
+
+	// 6. Fallback: hash first few messages for stable session binding
+	// Use up to first 3 messages for more stable identification
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.Exists() && messages.IsArray() {
+		h := fnv.New64a()
+		count := 0
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			if count >= 3 {
+				return false // stop after 3 messages
+			}
+			role := msg.Get("role").String()
+			content := extractMessageContent(msg.Get("content"))
+			if role != "" || content != "" {
+				h.Write([]byte(role + ":" + content + "\n"))
+				count++
+			}
+			return true
+		})
+		if count > 0 {
+			return fmt.Sprintf("msg:%016x", h.Sum64())
+		}
+	}
+
+	return ""
+}
+
+// extractMessageContent extracts text content from a message content field.
+// Handles both string content and array content (multimodal messages).
+// For array content, extracts text from all text-type elements.
+func extractMessageContent(content gjson.Result) string {
+	// String content: "Hello world"
+	if content.Type == gjson.String {
+		return content.String()
+	}
+
+	// Array content: [{"type":"text","text":"Hello"},{"type":"image",...}]
+	if content.IsArray() {
+		var texts []string
+		content.ForEach(func(_, part gjson.Result) bool {
+			// Handle Claude format: {"type":"text","text":"content"}
+			if part.Get("type").String() == "text" {
+				if text := part.Get("text").String(); text != "" {
+					texts = append(texts, text)
+				}
+			}
+			// Handle OpenAI format: {"type":"text","text":"content"}
+			// Same structure as Claude, already handled above
+			return true
+		})
+		if len(texts) > 0 {
+			return strings.Join(texts, " ")
+		}
+	}
+
+	return ""
+}
+
+// extractSessionID is kept for backward compatibility.
+// Deprecated: Use ExtractSessionID instead.
+func extractSessionID(payload []byte) string {
+	return ExtractSessionID(nil, payload, nil)
 }
