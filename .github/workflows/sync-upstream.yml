@@ -1,0 +1,256 @@
+name: Sync Upstream and Rebase
+
+on:
+  schedule:
+    # 每天 UTC 时间 0 点检查一次 (北京时间早上 8 点)
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+# 要保留的 feature 分支 (按 squash merge 顺序)
+env:
+  FEATURE_BRANCHES: |
+    feat/thinking-aware-model-mapping
+    feat/session-affinity
+    feat/web-search-claude
+    feat/ci-sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream --tags --force
+          git fetch origin --tags --force
+
+      - name: Check if sync needed
+        id: check
+        run: |
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+
+          # 检查上游 HEAD 是否已经在本地历史中
+          if git merge-base --is-ancestor "$UPSTREAM_HEAD" HEAD; then
+            echo "Already up to date"
+            echo "need_sync=false" >> $GITHUB_OUTPUT
+          else
+            echo "Need to sync"
+            echo "need_sync=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Rebase feature branches and rebuild main
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          echo "=== Rebasing feature branches onto upstream/main ==="
+
+          # 读取 feature 分支列表
+          BRANCHES=$(echo "$FEATURE_BRANCHES" | tr '\n' ' ' | xargs)
+
+          # 先 rebase 每个 feature 分支到 upstream/main
+          for branch in $BRANCHES; do
+            echo "--- Processing $branch ---"
+
+            # 检查分支是否存在
+            if ! git rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+              echo "Branch $branch not found, skipping"
+              continue
+            fi
+
+            # checkout 分支
+            git checkout -B "$branch" "origin/$branch"
+
+            # 获取该分支相对于 upstream/main 的 commit 数量
+            COMMIT_COUNT=$(git rev-list --count upstream/main..HEAD)
+            echo "Branch $branch has $COMMIT_COUNT commits ahead of upstream/main"
+
+            # Rebase 到 upstream/main
+            if ! git rebase upstream/main; then
+              echo "Rebase failed for $branch, trying to resolve..."
+              git rebase --abort
+              echo "ERROR: Could not rebase $branch"
+              exit 1
+            fi
+
+            # Push rebased branch
+            git push origin "$branch" --force-with-lease
+            echo "Pushed rebased $branch"
+          done
+
+          echo "=== Rebuilding main branch ==="
+
+          # 从 upstream/main 开始重建 main
+          git checkout -B main upstream/main
+
+          # 依次 squash merge 每个 feature 分支
+          for branch in $BRANCHES; do
+            echo "--- Squash merging $branch ---"
+
+            # 检查分支是否存在
+            if ! git rev-parse --verify "$branch" >/dev/null 2>&1; then
+              echo "Branch $branch not found, skipping"
+              continue
+            fi
+
+            # 获取该分支的第一个 commit message 作为 squash commit message
+            COMMIT_MSG=$(git log "$branch" --not upstream/main --format="%s" | tail -1)
+
+            if [ -z "$COMMIT_MSG" ]; then
+              echo "No commits to merge from $branch, skipping"
+              continue
+            fi
+
+            # Squash merge
+            git merge "$branch" --squash
+            git commit -m "$COMMIT_MSG"
+
+            echo "Squash merged $branch with message: $COMMIT_MSG"
+          done
+
+          echo "=== Main branch rebuilt ==="
+          git log --oneline -10
+
+      - name: Force push main
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          git push origin main --force-with-lease
+          echo "Pushed to origin/main"
+
+      - name: Check for new upstream tags
+        id: tags
+        run: |
+          # 获取上游最新的 tag
+          LATEST_UPSTREAM_TAG=$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || echo "")
+          echo "Latest upstream tag: $LATEST_UPSTREAM_TAG"
+
+          if [ -z "$LATEST_UPSTREAM_TAG" ]; then
+            echo "No tags found"
+            echo "new_tag=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 构造我们的 tag 名称
+          OUR_TAG="${LATEST_UPSTREAM_TAG}-antiWebsearch"
+
+          # 检查这个 tag 是否已经在 origin 存在
+          if git ls-remote --tags origin | grep -q "refs/tags/${OUR_TAG}$"; then
+            echo "Tag $OUR_TAG already exists in origin"
+            echo "new_tag=" >> $GITHUB_OUTPUT
+          else
+            echo "New tag to create: $OUR_TAG"
+            echo "new_tag=$LATEST_UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create rebased tag
+        if: steps.tags.outputs.new_tag != ''
+        id: create_tag
+        run: |
+          UPSTREAM_TAG="${{ steps.tags.outputs.new_tag }}"
+          # 添加自定义后缀
+          NEW_TAG="${UPSTREAM_TAG}-antiWebsearch"
+          echo "Creating tag $NEW_TAG on rebased main (based on upstream $UPSTREAM_TAG)"
+
+          # 在当前 HEAD (包含你的 commit) 上创建 tag
+          git tag -f "$NEW_TAG"
+          git push origin "$NEW_TAG" --force
+
+          echo "Tag $NEW_TAG pushed to origin"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+
+      - name: Find previous custom tag
+        if: steps.tags.outputs.new_tag != ''
+        id: prev_tag
+        run: |
+          # 找到我们之前的 antiWebsearch tag
+          PREV_TAG=$(git tag -l '*-antiWebsearch' --sort=-version:refname | grep -v "${{ steps.create_tag.outputs.new_tag }}" | head -1)
+          echo "Previous custom tag: $PREV_TAG"
+
+          if [ -n "$PREV_TAG" ]; then
+            # 提取上游版本号
+            PREV_UPSTREAM_TAG=$(echo "$PREV_TAG" | sed 's/-antiWebsearch$//')
+            echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+            echo "prev_upstream_tag=$PREV_UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          else
+            echo "prev_tag=" >> $GITHUB_OUTPUT
+            echo "prev_upstream_tag=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Release Notes
+        if: steps.tags.outputs.new_tag != ''
+        id: release_notes
+        run: |
+          NEW_TAG="${{ steps.create_tag.outputs.new_tag }}"
+          UPSTREAM_TAG="${{ steps.create_tag.outputs.upstream_tag }}"
+          PREV_UPSTREAM_TAG="${{ steps.prev_tag.outputs.prev_upstream_tag }}"
+
+          # 生成 release notes
+          cat > release_notes.md << 'HEADER'
+          ## 🚀 Custom Features (antiWebsearch)
+
+          This release is based on upstream `UPSTREAM_TAG_PLACEHOLDER` with the following custom modifications:
+
+          HEADER
+
+          sed -i "s/UPSTREAM_TAG_PLACEHOLDER/$UPSTREAM_TAG/" release_notes.md
+
+          # 添加自定义 commit 列表
+          cat >> release_notes.md << 'CUSTOM'
+          ### Custom Feature Branches
+          - **feat/thinking-aware-model-mapping**: add thinking-aware model mapping for Amp CLI requests
+          - **feat/session-affinity**: add session affinity with metadata.user_id priority for Claude Code clients
+          - **feat/web-search-claude**: add web_search support for Claude via Gemini googleSearch
+          - **feat/ci-sync-upstream**: add workflow to auto sync upstream and rebase custom commits
+
+          ---
+
+          CUSTOM
+
+          # 添加上游更新
+          if [ -n "$PREV_UPSTREAM_TAG" ]; then
+            echo "## 📦 Upstream Changes (since $PREV_UPSTREAM_TAG)" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "Changes from upstream \`$PREV_UPSTREAM_TAG\` → \`$UPSTREAM_TAG\`:" >> release_notes.md
+            echo "" >> release_notes.md
+
+            # 获取上游 commit 列表
+            git log --oneline "${PREV_UPSTREAM_TAG}..${UPSTREAM_TAG}" --pretty=format:"- %s" 2>/dev/null >> release_notes.md || echo "- Unable to fetch upstream commits" >> release_notes.md
+
+            echo "" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "📋 [View full upstream changelog](https://github.com/router-for-me/CLIProxyAPI/compare/${PREV_UPSTREAM_TAG}...${UPSTREAM_TAG})" >> release_notes.md
+          else
+            echo "## 📦 Upstream Changes" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "Based on upstream [\`$UPSTREAM_TAG\`](https://github.com/router-for-me/CLIProxyAPI/releases/tag/$UPSTREAM_TAG)" >> release_notes.md
+          fi
+
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        if: steps.tags.outputs.new_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          NEW_TAG="${{ steps.create_tag.outputs.new_tag }}"
+          REPO="${{ github.repository }}"
+
+          # 删除已存在的 release（如果有）
+          gh release delete "$NEW_TAG" --repo "$REPO" --yes 2>/dev/null || true
+
+          # 创建新的 release
+          gh release create "$NEW_TAG" \
+            --repo "$REPO" \
+            --title "$NEW_TAG" \
+            --notes-file release_notes.md \
+            --latest
