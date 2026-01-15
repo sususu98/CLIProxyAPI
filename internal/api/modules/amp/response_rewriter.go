@@ -15,9 +15,11 @@ import (
 // It's used to rewrite model names in responses when model mapping is used
 type ResponseRewriter struct {
 	gin.ResponseWriter
-	body          *bytes.Buffer
-	originalModel string
-	isStreaming   bool
+	body                  *bytes.Buffer
+	originalModel         string
+	isStreaming           bool
+	stripThinkingResponse bool
+	thinkingBlockIndexes  map[int]bool // tracks which block indexes are thinking blocks
 }
 
 // NewResponseRewriter creates a new response rewriter for model name substitution
@@ -26,6 +28,16 @@ func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRe
 		ResponseWriter: w,
 		body:           &bytes.Buffer{},
 		originalModel:  originalModel,
+	}
+}
+
+// NewResponseRewriterWithOptions creates a new response rewriter with additional options
+func NewResponseRewriterWithOptions(w gin.ResponseWriter, originalModel string, stripThinkingResponse bool) *ResponseRewriter {
+	return &ResponseRewriter{
+		ResponseWriter:        w,
+		body:                  &bytes.Buffer{},
+		originalModel:         originalModel,
+		stripThinkingResponse: stripThinkingResponse,
 	}
 }
 
@@ -104,24 +116,69 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 	return data
 }
 
-// rewriteStreamChunk rewrites model names in SSE stream chunks
+// rewriteStreamChunk rewrites model names in SSE stream chunks and optionally strips thinking events
 func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
-	if rw.originalModel == "" {
-		return chunk
-	}
-
 	// SSE format: "data: {json}\n\n"
 	lines := bytes.Split(chunk, []byte("\n"))
-	for i, line := range lines {
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			jsonData := bytes.TrimPrefix(line, []byte("data: "))
+	var result [][]byte
+
+	for _, line := range lines {
+		// Handle data lines
+		if jsonData, found := bytes.CutPrefix(line, []byte("data: ")); found {
 			if len(jsonData) > 0 && jsonData[0] == '{' {
-				// Rewrite JSON in the data line
+				// Check if this is a thinking event that should be stripped
+				if rw.stripThinkingResponse && rw.isThinkingEvent(jsonData) {
+					log.Debugf("amp response rewriter: stripping thinking event")
+					continue // Skip this line entirely
+				}
+
+				// Rewrite JSON in the data line (model names and possibly strip thinking from content)
 				rewritten := rw.rewriteModelInResponse(jsonData)
-				lines[i] = append([]byte("data: "), rewritten...)
+				result = append(result, append([]byte("data: "), rewritten...))
+				continue
 			}
 		}
+		result = append(result, line)
 	}
 
-	return bytes.Join(lines, []byte("\n"))
+	return bytes.Join(result, []byte("\n"))
+}
+
+// isThinkingEvent checks if an SSE data payload is a thinking-related event.
+// This includes content_block_start with thinking type, content_block_delta with thinking_delta,
+// and content_block_stop for thinking blocks.
+func (rw *ResponseRewriter) isThinkingEvent(data []byte) bool {
+	eventType := gjson.GetBytes(data, "type").String()
+
+	switch eventType {
+	case "content_block_start":
+		// Check if content_block.type is "thinking"
+		blockType := gjson.GetBytes(data, "content_block.type").String()
+		if blockType == "thinking" {
+			// Track this block index as a thinking block
+			index := int(gjson.GetBytes(data, "index").Int())
+			if rw.thinkingBlockIndexes == nil {
+				rw.thinkingBlockIndexes = make(map[int]bool)
+			}
+			rw.thinkingBlockIndexes[index] = true
+			return true
+		}
+		return false
+
+	case "content_block_delta":
+		// Check if delta.type is "thinking_delta" or "signature_delta"
+		deltaType := gjson.GetBytes(data, "delta.type").String()
+		return deltaType == "thinking_delta" || deltaType == "signature_delta"
+
+	case "content_block_stop":
+		// Check if this stop event is for a thinking block
+		index := int(gjson.GetBytes(data, "index").Int())
+		if rw.thinkingBlockIndexes != nil && rw.thinkingBlockIndexes[index] {
+			delete(rw.thinkingBlockIndexes, index)
+			return true
+		}
+		return false
+	}
+
+	return false
 }
