@@ -364,11 +364,9 @@ func sanitizeAntigravityFileName(email string) string {
 
 // Antigravity API constants for project discovery
 const (
-	antigravityAPIEndpoint    = "https://cloudcode-pa.googleapis.com"
-	antigravityAPIVersion     = "v1internal"
-	antigravityAPIUserAgent   = "google-api-nodejs-client/9.15.1"
-	antigravityAPIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	antigravityClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+	antigravityAPIEndpoint  = "https://daily-cloudcode-pa.googleapis.com"
+	antigravityAPIVersion   = "v1internal"
+	antigravityAPIUserAgent = "antigravity/1.14.2"
 )
 
 // FetchAntigravityProjectID exposes project discovery for external callers.
@@ -379,12 +377,10 @@ func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 // fetchAntigravityProjectID retrieves the project ID for the authenticated user via loadCodeAssist.
 // This uses the same approach as Gemini CLI to get the cloudaicompanionProject.
 func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
-	// Call loadCodeAssist to get the project
+	// Call loadCodeAssist to get the project (matching Antigravity CLI format)
 	loadReqBody := map[string]any{
 		"metadata": map[string]string{
-			"ideType":    "ANTIGRAVITY",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
+			"ideType": "ANTIGRAVITY",
 		},
 	}
 
@@ -401,8 +397,6 @@ func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", antigravityAPIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
-	req.Header.Set("Client-Metadata", antigravityClientMetadata)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -441,8 +435,9 @@ func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 		}
 	}
 
+	// If no projectID, try onboarding
 	if projectID == "" {
-		tierID := "legacy-tier"
+		tierID := "standard-tier"
 		if tiers, okTiers := loadResp["allowedTiers"].([]any); okTiers {
 			for _, rawTier := range tiers {
 				tier, okTier := rawTier.(map[string]any)
@@ -458,29 +453,30 @@ func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 			}
 		}
 
-		projectID, err = antigravityOnboardUser(ctx, accessToken, tierID, httpClient)
-		if err != nil {
-			return "", err
+		log.Infof("antigravity: no cloudaicompanionProject in loadCodeAssist, trying onboardUser with tier: %s", tierID)
+		onboardedProjectID, errOnboard := antigravityOnboardUser(ctx, accessToken, tierID, httpClient)
+		if errOnboard != nil {
+			return "", fmt.Errorf("onboard user failed: %w", errOnboard)
 		}
-		return projectID, nil
+		if strings.TrimSpace(onboardedProjectID) == "" {
+			return "", fmt.Errorf("no cloudaicompanionProject after onboarding")
+		}
+		return onboardedProjectID, nil
 	}
 
 	return projectID, nil
 }
 
-// antigravityOnboardUser attempts to fetch the project ID via onboardUser by polling for completion.
-// It returns an empty string when the operation times out or completes without a project ID.
+// antigravityOnboardUser attempts to activate the user and get a project ID via onboardUser.
 func antigravityOnboardUser(ctx context.Context, accessToken, tierID string, httpClient *http.Client) (string, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	fmt.Println("Antigravity: onboarding user...", tierID)
+
 	requestBody := map[string]any{
 		"tierId": tierID,
 		"metadata": map[string]string{
-			"ideType":    "ANTIGRAVITY",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
+			"ideType": "ANTIGRAVITY",
 		},
 	}
 
@@ -491,7 +487,7 @@ func antigravityOnboardUser(ctx context.Context, accessToken, tierID string, htt
 
 	maxAttempts := 5
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		log.Debugf("Polling attempt %d/%d", attempt, maxAttempts)
+		log.Debugf("antigravity onboardUser: polling attempt %d/%d", attempt, maxAttempts)
 
 		reqCtx := ctx
 		var cancel context.CancelFunc
@@ -509,8 +505,6 @@ func antigravityOnboardUser(ctx context.Context, accessToken, tierID string, htt
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", antigravityAPIUserAgent)
-		req.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
-		req.Header.Set("Client-Metadata", antigravityClientMetadata)
 
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
@@ -520,7 +514,7 @@ func antigravityOnboardUser(ctx context.Context, accessToken, tierID string, htt
 
 		bodyBytes, errRead := io.ReadAll(resp.Body)
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("close body error: %v", errClose)
+			log.Errorf("antigravity onboardUser: close body error: %v", errClose)
 		}
 		cancel()
 
@@ -528,48 +522,39 @@ func antigravityOnboardUser(ctx context.Context, accessToken, tierID string, htt
 			return "", fmt.Errorf("read response: %w", errRead)
 		}
 
-		if resp.StatusCode == http.StatusOK {
-			var data map[string]any
-			if errDecode := json.Unmarshal(bodyBytes, &data); errDecode != nil {
-				return "", fmt.Errorf("decode response: %w", errDecode)
-			}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return "", fmt.Errorf("onboardUser failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		}
 
-			if done, okDone := data["done"].(bool); okDone && done {
-				projectID := ""
-				if responseData, okResp := data["response"].(map[string]any); okResp {
-					switch projectValue := responseData["cloudaicompanionProject"].(type) {
-					case map[string]any:
-						if id, okID := projectValue["id"].(string); okID {
-							projectID = strings.TrimSpace(id)
-						}
-					case string:
-						projectID = strings.TrimSpace(projectValue)
+		var data map[string]any
+		if errDecode := json.Unmarshal(bodyBytes, &data); errDecode != nil {
+			return "", fmt.Errorf("decode response: %w", errDecode)
+		}
+
+		if done, okDone := data["done"].(bool); okDone && done {
+			projectID := ""
+			if responseData, okResp := data["response"].(map[string]any); okResp {
+				switch projectValue := responseData["cloudaicompanionProject"].(type) {
+				case map[string]any:
+					if id, okID := projectValue["id"].(string); okID {
+						projectID = strings.TrimSpace(id)
 					}
+				case string:
+					projectID = strings.TrimSpace(projectValue)
 				}
-
-				if projectID != "" {
-					log.Infof("Successfully fetched project_id: %s", projectID)
-					return projectID, nil
-				}
-
-				return "", fmt.Errorf("no project_id in response")
 			}
 
-			time.Sleep(2 * time.Second)
-			continue
+			if projectID != "" {
+				log.Infof("antigravity onboardUser: successfully obtained project_id: %s", projectID)
+				return projectID, nil
+			}
+
+			return "", fmt.Errorf("onboardUser completed but no project_id in response")
 		}
 
-		responsePreview := strings.TrimSpace(string(bodyBytes))
-		if len(responsePreview) > 500 {
-			responsePreview = responsePreview[:500]
-		}
-
-		responseErr := responsePreview
-		if len(responseErr) > 200 {
-			responseErr = responseErr[:200]
-		}
-		return "", fmt.Errorf("http %d: %s", resp.StatusCode, responseErr)
+		log.Debugf("antigravity onboardUser: operation not done yet, waiting 2 seconds...")
+		time.Sleep(2 * time.Second)
 	}
 
-	return "", nil
+	return "", fmt.Errorf("onboardUser timed out after %d attempts", maxAttempts)
 }

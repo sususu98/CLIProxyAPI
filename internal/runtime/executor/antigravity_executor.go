@@ -192,6 +192,20 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
+
+			// Check if this is a project_id error and try to refresh
+			if isProjectIDError(httpResp.StatusCode, bodyBytes) {
+				log.Infof("antigravity executor: detected project_id error, attempting to refresh project_id")
+				if errRefresh := e.refreshAntigravityProjectID(ctx, auth, token, true); errRefresh == nil {
+					// Rebuild request with new project_id and retry
+					httpReq, errReq = e.buildRequest(ctx, auth, token, req.Model, translated, false, opts.Alt, baseURL)
+					if errReq == nil {
+						log.Infof("antigravity executor: retrying request with refreshed project_id")
+						continue
+					}
+				}
+			}
+
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -323,6 +337,20 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
+
+			// Check if this is a project_id error and try to refresh
+			if isProjectIDError(httpResp.StatusCode, bodyBytes) {
+				log.Infof("antigravity executor: detected project_id error in claude stream, attempting to refresh project_id")
+				if errRefresh := e.refreshAntigravityProjectID(ctx, auth, token, true); errRefresh == nil {
+					// Rebuild request with new project_id and retry
+					httpReq, errReq = e.buildRequest(ctx, auth, token, req.Model, translated, true, opts.Alt, baseURL)
+					if errReq == nil {
+						log.Infof("antigravity executor: retrying claude stream request with refreshed project_id")
+						continue
+					}
+				}
+			}
+
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -1136,11 +1164,15 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
+	return e.refreshAntigravityProjectID(ctx, auth, accessToken, false)
+}
+
+func (e *AntigravityExecutor) refreshAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, force bool) error {
 	if auth == nil {
 		return nil
 	}
 
-	if auth.Metadata["project_id"] != nil {
+	if !force && auth.Metadata["project_id"] != nil {
 		return nil
 	}
 
@@ -1163,9 +1195,25 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
+	oldProjectID := metaStringValue(auth.Metadata, "project_id")
 	auth.Metadata["project_id"] = strings.TrimSpace(projectID)
+	if force && oldProjectID != "" && oldProjectID != projectID {
+		log.Infof("antigravity executor: project_id refreshed from %s to %s", oldProjectID, projectID)
+	}
 
 	return nil
+}
+
+// isProjectIDError checks if the error response indicates an invalid project_id
+func isProjectIDError(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusForbidden && statusCode != http.StatusNotFound {
+		return false
+	}
+	bodyStr := strings.ToLower(string(body))
+	return strings.Contains(bodyStr, "project") ||
+		strings.Contains(bodyStr, "cloudaicompanion") ||
+		strings.Contains(bodyStr, "invalid") ||
+		strings.Contains(bodyStr, "not found")
 }
 
 func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {
