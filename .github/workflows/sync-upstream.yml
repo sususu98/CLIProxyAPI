@@ -16,6 +16,7 @@ env:
     feature/amp-thinking-mapping
     feature/session-affinity
     feature/antigravity-websearch
+    fix/antigravity-enum-string
 
 jobs:
   sync:
