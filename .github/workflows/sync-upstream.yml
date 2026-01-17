@@ -1,0 +1,136 @@
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'Upstream tag to sync to (leave empty for latest)'
+        required: false
+        type: string
+
+env:
+  FEATURE_BRANCHES: |
+    feature/ci-workflows
+    feature/amp-thinking-mapping
+    feature/session-affinity
+    feature/antigravity-websearch
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream --tags --force
+          git fetch origin
+
+      - name: Get latest tag
+        id: tag
+        run: |
+          TAG="${{ inputs.target_tag }}"
+          [ -z "$TAG" ] && TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $TAG"
+
+      - name: Sync feature branches
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          TAG_COMMIT=$(git rev-parse "$TAG")
+
+          for branch in $FEATURE_BRANCHES; do
+            branch=$(echo "$branch" | tr -d ' ')
+            [ -z "$branch" ] && continue
+
+            echo "=== Syncing $branch ==="
+
+            if ! git rev-parse "origin/$branch" >/dev/null 2>&1; then
+              echo "Branch $branch not found, skipping"
+              continue
+            fi
+
+            # Find all commits on this branch that are NOT in upstream tag
+            # These are the feature commits we need to preserve
+            COMMITS=$(git log --reverse --oneline "$TAG_COMMIT".."origin/$branch" --format="%H" 2>/dev/null)
+
+            if [ -z "$COMMITS" ]; then
+              echo "No feature commits found, skipping"
+              continue
+            fi
+
+            COMMIT_COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
+            echo "Found $COMMIT_COUNT feature commit(s) to rebase"
+
+            git checkout -B "$branch" "$TAG"
+
+            FAILED=false
+            for commit in $COMMITS; do
+              SHORT=$(git log --oneline -1 "$commit" | head -c 50)
+              echo "Cherry-picking: $SHORT"
+              if ! git cherry-pick "$commit" --allow-empty; then
+                git cherry-pick --abort 2>/dev/null || true
+                echo "✗ Failed at $SHORT"
+                FAILED=true
+                break
+              fi
+            done
+
+            if [ "$FAILED" = "false" ]; then
+              git push origin "$branch" --force
+              echo "✓ $branch synced ($COMMIT_COUNT commits)"
+            else
+              echo "✗ $branch failed"
+            fi
+          done
+
+      - name: Sync main branch
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          TAG_COMMIT=$(git rev-parse "$TAG")
+          echo "=== Syncing main ==="
+
+          git checkout -B main "$TAG"
+
+          for branch in $FEATURE_BRANCHES; do
+            branch=$(echo "$branch" | tr -d ' ')
+            [ -z "$branch" ] && continue
+
+            # Check if branch has commits beyond tag
+            COMMIT_COUNT=$(git rev-list --count "$TAG_COMMIT".."origin/$branch" 2>/dev/null || echo 0)
+
+            if [ "$COMMIT_COUNT" -eq 0 ]; then
+              echo "No commits from $branch, skipping"
+              continue
+            fi
+
+            echo "Squash merging $branch ($COMMIT_COUNT commits)..."
+
+            # Get the first commit message for the squash commit
+            FIRST_MSG=$(git log --format="%s" "$TAG_COMMIT".."origin/$branch" | tail -1)
+
+            # Squash merge: apply all changes as single commit
+            if git merge --squash "origin/$branch" >/dev/null 2>&1; then
+              git commit -m "$FIRST_MSG" --no-edit
+              echo "✓ $branch squashed"
+            else
+              git reset --hard HEAD
+              echo "✗ $branch merge failed"
+              exit 1
+            fi
+          done
+
+          git push origin main --force
+          echo "✓ main synced"
