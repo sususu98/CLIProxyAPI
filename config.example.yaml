@@ -206,13 +206,28 @@ codex-instructions-enabled: false
 #   # Route unavailable Amp models to alternative models available in your local proxy.
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
 #   # but you have a similar model available (e.g., Claude Sonnet 4).
+#   #
+#   # Basic mapping: all requests to "from" are routed to "to"
+#   # Thinking-aware mapping: different targets for thinking vs non-thinking requests
+#   #   - to-thinking: target for requests with thinking.type=enabled
+#   #   - to-non-thinking: target for requests without thinking enabled
+#   #   - strip-thinking-response: remove thinking blocks from response (useful when
+#   #     routing non-thinking requests to a thinking-only model)
 #   model-mappings:
-#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
-#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
-#     - from: "claude-sonnet-4-5-20250929"
-#       to: "gemini-claude-sonnet-4-5-thinking"
+#     # Basic mapping example
 #     - from: "claude-haiku-4-5-20251001"
 #       to: "gemini-2.5-flash"
+#
+#     # Thinking-aware mapping: Sonnet supports both thinking and non-thinking models
+#     - from: "claude-sonnet-4-5-20250929"
+#       to-thinking: "gemini-claude-sonnet-4-5-thinking"      # thinking requests -> thinking model
+#       to-non-thinking: "gemini-claude-sonnet-4-5"           # non-thinking requests -> non-thinking model
+#
+#     # Thinking-aware mapping: Opus only has thinking model available
+#     # For non-thinking requests, use thinking model but strip thinking blocks from response
+#     - from: "claude-opus-4-5-20251101"
+#       to: "gemini-claude-opus-4-5-thinking"                 # all requests -> thinking model
+#       strip-thinking-response: true                         # remove thinking blocks for non-thinking requests
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.

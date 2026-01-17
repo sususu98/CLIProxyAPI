@@ -171,7 +171,20 @@ type AmpModelMapping struct {
 
 	// To is the target model name to route to (e.g., "claude-sonnet-4").
 	// The target model must have available providers in the registry.
+	// Used when ToThinking and ToNonThinking are not specified.
 	To string `yaml:"to" json:"to"`
+
+	// ToThinking is the target model for thinking-enabled requests.
+	// When specified, requests with thinking.type=enabled will be routed here.
+	ToThinking string `yaml:"to-thinking,omitempty" json:"to-thinking,omitempty"`
+
+	// ToNonThinking is the target model for non-thinking requests.
+	// When specified, requests without thinking enabled will be routed here.
+	ToNonThinking string `yaml:"to-non-thinking,omitempty" json:"to-non-thinking,omitempty"`
+
+	// StripThinkingResponse when true, removes thinking blocks from the response.
+	// Useful when routing non-thinking requests to a thinking-only model.
+	StripThinkingResponse bool `yaml:"strip-thinking-response,omitempty" json:"strip-thinking-response,omitempty"`
 
 	// Regex indicates whether the 'from' field should be interpreted as a regular
 	// expression for matching model names. When true, this mapping is evaluated
