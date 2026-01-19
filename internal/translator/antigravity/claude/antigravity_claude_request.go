@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
@@ -19,9 +20,27 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// sessionPattern matches Claude Code user_id format:
+// user_{hash}_account__session_{uuid}
+var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
+
 // deriveSessionID generates a stable session ID from the request.
-// Uses the hash of the first user message to identify the conversation.
+// Priority order:
+//  1. metadata.user_id with Claude Code session format (_session_{uuid}) - highest priority
+//  2. Full metadata.user_id as fallback
+//  3. Hash of the first user message content (legacy fallback)
 func deriveSessionID(rawJSON []byte) string {
+	// 1. Try metadata.user_id with Claude Code session format first (highest priority)
+	userID := gjson.GetBytes(rawJSON, "metadata.user_id").String()
+	if userID != "" {
+		if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+			return "claude:" + matches[1]
+		}
+		// 2. Use full user_id as fallback if no session pattern
+		return "user:" + userID
+	}
+
+	// 3. Legacy fallback: hash of first user message
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if !messages.IsArray() {
 		return ""
@@ -35,7 +54,7 @@ func deriveSessionID(rawJSON []byte) string {
 			}
 			if content != "" {
 				h := sha256.Sum256([]byte(content))
-				return hex.EncodeToString(h[:16])
+				return "msg:" + hex.EncodeToString(h[:16])
 			}
 		}
 	}
