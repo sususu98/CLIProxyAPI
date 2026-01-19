@@ -62,6 +62,11 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// AntigravityWarmupOn429 enables sending a warmup request when Antigravity returns 429.
+	// When enabled, a lightweight request is sent in background to potentially refresh quota.
+	// Default is false (disabled).
+	AntigravityWarmupOn429 bool `yaml:"antigravity-warmup-on-429" json:"antigravity-warmup-on-429"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 

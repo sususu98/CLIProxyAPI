@@ -201,6 +201,10 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 				if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
 				}
+				// Send warmup request in background to potentially refresh quota (if enabled)
+				if e.cfg != nil && e.cfg.AntigravityWarmupOn429 {
+					go e.sendWarmupRequest(auth)
+				}
 			}
 			err = sErr
 			return resp, err
@@ -220,6 +224,10 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		if lastStatus == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
+			}
+			// Send warmup request in background to potentially refresh quota (if enabled)
+			if e.cfg != nil && e.cfg.AntigravityWarmupOn429 {
+				go e.sendWarmupRequest(auth)
 			}
 		}
 		err = sErr
@@ -338,6 +346,10 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
 				}
+				// Send warmup request in background to potentially refresh quota (if enabled)
+				if e.cfg != nil && e.cfg.AntigravityWarmupOn429 {
+					go e.sendWarmupRequest(auth)
+				}
 			}
 			err = sErr
 			return resp, err
@@ -408,6 +420,10 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if lastStatus == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
+			}
+			// Send warmup request in background to potentially refresh quota (if enabled)
+			if e.cfg != nil && e.cfg.AntigravityWarmupOn429 {
+				go e.sendWarmupRequest(auth)
 			}
 		}
 		err = sErr
@@ -711,6 +727,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
 				}
+				// Send warmup request in background to potentially refresh quota (if enabled)
+				if e.cfg != nil && e.cfg.AntigravityWarmupOn429 {
+					go e.sendWarmupRequest(auth)
+				}
 			}
 			err = sErr
 			return nil, err
@@ -772,6 +792,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		if lastStatus == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
+			}
+			// Send warmup request in background to potentially refresh quota (if enabled)
+			if e.cfg != nil && e.cfg.AntigravityWarmupOn429 {
+				go e.sendWarmupRequest(auth)
 			}
 		}
 		err = sErr
@@ -1773,6 +1797,34 @@ func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
 
 	respJSON, _ := json.Marshal(response)
 	return string(respJSON)
+}
+
+// sendWarmupRequest sends a lightweight request to potentially refresh quota after 429 errors.
+// This uses gemini-3-flash model with minimal tokens to minimize cost.
+// It reuses the existing Execute flow to ensure the request format is correct.
+func (e *AntigravityExecutor) sendWarmupRequest(auth *cliproxyauth.Auth) {
+	// Use a fresh background context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Build a minimal warmup request in OpenAI-compatible format
+	// This will be translated by Execute to the correct Antigravity format
+	warmupPayload := []byte(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"temperature":0}`)
+
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3-flash",
+		Payload: warmupPayload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	}
+
+	_, err := e.Execute(ctx, auth, req, opts)
+	if err != nil {
+		log.Debugf("antigravity executor: warmup request failed: %v", err)
+		return
+	}
+	log.Infof("antigravity executor: warmup request successful")
 }
 
 // convertGeminiToClaudeSSEStream converts a Gemini response to Claude SSE stream format.
