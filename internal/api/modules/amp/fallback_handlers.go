@@ -32,6 +32,9 @@ const (
 // MappedModelContextKey is the Gin context key for passing mapped model names.
 const MappedModelContextKey = "mapped_model"
 
+// StripThinkingContextKey is the Gin context key for passing strip thinking response flag.
+const StripThinkingContextKey = "strip_thinking_response"
+
 // logAmpRouting logs the routing decision for an Amp request with structured fields
 func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
 	fields := log.Fields{
@@ -142,18 +145,25 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			thinkingSuffix = "(" + suffixResult.RawSuffix + ")"
 		}
 
-		resolveMappedModel := func() (string, []string) {
+		// Detect if thinking mode is enabled in the request body
+		thinkingEnabled := isThinkingEnabled(bodyBytes)
+
+		// resolveMappedModel returns (mappedModel, providers, stripThinkingResponse)
+		resolveMappedModel := func() (string, []string, bool) {
 			if fh.modelMapper == nil {
-				return "", nil
+				return "", nil, false
 			}
 
-			mappedModel := fh.modelMapper.MapModel(modelName)
-			if mappedModel == "" {
-				mappedModel = fh.modelMapper.MapModel(normalizedModel)
+			// Use thinking-aware mapping
+			result := fh.modelMapper.MapModelWithThinking(modelName, thinkingEnabled)
+			if result.TargetModel == "" {
+				// Try with normalized model
+				result = fh.modelMapper.MapModelWithThinking(normalizedModel, thinkingEnabled)
 			}
-			mappedModel = strings.TrimSpace(mappedModel)
+
+			mappedModel := strings.TrimSpace(result.TargetModel)
 			if mappedModel == "" {
-				return "", nil
+				return "", nil, false
 			}
 
 			// Preserve dynamic thinking suffix (e.g. "(xhigh)") when mapping applies, unless the target
@@ -168,15 +178,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			mappedBaseModel := thinking.ParseSuffix(mappedModel).ModelName
 			mappedProviders := util.GetProviderName(mappedBaseModel)
 			if len(mappedProviders) == 0 {
-				return "", nil
+				return "", nil, false
 			}
 
-			return mappedModel, mappedProviders
+			return mappedModel, mappedProviders, result.StripThinkingResponse
 		}
 
 		// Track resolved model for logging (may change if mapping is applied)
 		resolvedModel := normalizedModel
 		usedMapping := false
+		stripThinkingResponse := false
 		var providers []string
 
 		// Check if model mappings should be forced ahead of local API keys
@@ -185,14 +196,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if forceMappings {
 			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
-			if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
+			if mappedModel, mappedProviders, stripThinking := resolveMappedModel(); mappedModel != "" {
 				// Mapping found and provider available - rewrite the model in request body
 				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				// Store mapped model in context for handlers that check it (like gemini bridge)
 				c.Set(MappedModelContextKey, mappedModel)
+				c.Set(StripThinkingContextKey, stripThinking)
 				resolvedModel = mappedModel
 				usedMapping = true
+				stripThinkingResponse = stripThinking
 				providers = mappedProviders
 			}
 
@@ -206,14 +219,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 			if len(providers) == 0 {
 				// No providers configured - check if we have a model mapping
-				if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
+				if mappedModel, mappedProviders, stripThinking := resolveMappedModel(); mappedModel != "" {
 					// Mapping found and provider available - rewrite the model in request body
 					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					// Store mapped model in context for handlers that check it (like gemini bridge)
 					c.Set(MappedModelContextKey, mappedModel)
+					c.Set(StripThinkingContextKey, stripThinking)
 					resolvedModel = mappedModel
 					usedMapping = true
+					stripThinkingResponse = stripThinking
 					providers = mappedProviders
 				}
 			}
@@ -246,9 +261,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 		if usedMapping {
 			// Log: Model was mapped to another model
-			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
+			log.Debugf("amp model mapping: request %s -> %s (thinking=%v, strip=%v)", normalizedModel, resolvedModel, thinkingEnabled, stripThinkingResponse)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := NewResponseRewriter(c.Writer, modelName)
+			rewriter := NewResponseRewriterWithOptions(c.Writer, modelName, stripThinkingResponse)
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
@@ -269,6 +284,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			handler(c)
 		}
 	}
+}
+
+// isThinkingEnabled checks if thinking mode is enabled in the request body.
+// Returns true if thinking.type is "enabled".
+func isThinkingEnabled(body []byte) bool {
+	thinkingResult := gjson.GetBytes(body, "thinking")
+	if !thinkingResult.Exists() || !thinkingResult.IsObject() {
+		return false
+	}
+	return thinkingResult.Get("type").String() == "enabled"
 }
 
 // filterAntropicBetaHeader filters Anthropic-Beta header to remove features requiring special subscription
