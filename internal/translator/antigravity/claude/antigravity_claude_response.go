@@ -64,7 +64,7 @@ var toolUseIDCounter uint64
 //
 // Returns:
 //   - []string: A slice of strings, each containing a Claude Code-compatible JSON response
-func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func ConvertAntigravityResponseToClaude(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
 	if *param == nil {
 		*param = &Params{
 			HasFirstResponse: false,
@@ -73,7 +73,9 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			SessionID:        deriveSessionID(originalRequestRawJSON),
 		}
 	}
-	modelName := gjson.GetBytes(requestRawJSON, "model").String()
+	if modelName == "" {
+		modelName = gjson.GetBytes(requestRawJSON, "model").String()
+	}
 
 	params := (*param).(*Params)
 
@@ -109,7 +111,9 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		}
 
 		// Override default values with actual response metadata if available from the Gemini CLI response
-		if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+		if modelName != "" {
+			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", modelName)
+		} else if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", modelVersionResult.String())
 		}
 		if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
@@ -371,9 +375,11 @@ func resolveStopReason(params *Params) string {
 //
 // Returns:
 //   - string: A Claude-compatible JSON response.
-func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	_ = originalRequestRawJSON
-	modelName := gjson.GetBytes(requestRawJSON, "model").String()
+	if modelName == "" {
+		modelName = gjson.GetBytes(requestRawJSON, "model").String()
+	}
 
 	root := gjson.ParseBytes(rawJSON)
 	promptTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
@@ -391,7 +397,11 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	responseJSON := `{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	responseJSON, _ = sjson.Set(responseJSON, "id", root.Get("response.responseId").String())
-	responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
+	if modelName != "" {
+		responseJSON, _ = sjson.Set(responseJSON, "model", modelName)
+	} else {
+		responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
+	}
 	responseJSON, _ = sjson.Set(responseJSON, "usage.input_tokens", promptTokens)
 	responseJSON, _ = sjson.Set(responseJSON, "usage.output_tokens", outputTokens)
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)

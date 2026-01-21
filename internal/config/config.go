@@ -156,10 +156,31 @@ type RoutingConfig struct {
 // It maps the upstream model name (Name) to the client-visible alias (Alias).
 // When Fork is true, the alias is added as an additional model in listings while
 // keeping the original model ID available.
+// When ForceMapping is true, responses will have the model name rewritten to match
+// the alias instead of showing the upstream model name.
+//
+// Thinking-aware mapping fields allow routing to different models based on whether
+// the request has thinking enabled:
+//   - ToThinking: target for requests with thinking.type=enabled
+//   - ToNonThinking: target for requests without thinking enabled
+//   - StripThinkingResponse: remove thinking blocks from response
 type OAuthModelAlias struct {
-	Name  string `yaml:"name" json:"name"`
-	Alias string `yaml:"alias" json:"alias"`
-	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+	Name         string `yaml:"name" json:"name"`
+	Alias        string `yaml:"alias" json:"alias"`
+	Fork         bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+	ForceMapping bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// ToThinking is the target model for thinking-enabled requests.
+	// When specified, requests with thinking.type=enabled will be routed here.
+	ToThinking string `yaml:"to-thinking,omitempty" json:"to-thinking,omitempty"`
+
+	// ToNonThinking is the target model for non-thinking requests.
+	// When specified, requests without thinking enabled will be routed here.
+	ToNonThinking string `yaml:"to-non-thinking,omitempty" json:"to-non-thinking,omitempty"`
+
+	// StripThinkingResponse when true, removes thinking blocks from the response.
+	// Useful when routing non-thinking requests to a thinking-only model.
+	StripThinkingResponse bool `yaml:"strip-thinking-response,omitempty" json:"strip-thinking-response,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -677,7 +698,17 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
+			toThinking := strings.TrimSpace(entry.ToThinking)
+			toNonThinking := strings.TrimSpace(entry.ToNonThinking)
+			clean = append(clean, OAuthModelAlias{
+				Name:                  name,
+				Alias:                 alias,
+				Fork:                  entry.Fork,
+				ForceMapping:          entry.ForceMapping,
+				ToThinking:            toThinking,
+				ToNonThinking:         toNonThinking,
+				StripThinkingResponse: entry.StripThinkingResponse,
+			})
 		}
 		if len(clean) > 0 {
 			out[channel] = clean

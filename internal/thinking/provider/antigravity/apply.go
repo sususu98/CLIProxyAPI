@@ -39,7 +39,12 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return a.applyCompatible(body, config, modelInfo)
 	}
 	if modelInfo.Thinking == nil {
-		return body, nil
+		isClaude := strings.Contains(strings.ToLower(modelInfo.ID), "claude")
+		// Allow Claude-like models to proceed without explicit registry config
+		// to support dynamic thinking routing (e.g. via suffix)
+		if !isClaude {
+			return body, nil
+		}
 	}
 
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {

@@ -54,3 +54,38 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 		}
 	}
 }
+
+func TestSanitizeOAuthModelAlias_PreservesRoutingFields(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"antigravity": {
+				{
+					Name:                  " claude-opus-4-5-thinking ",
+					Alias:                 " claude-opus-4-5 ",
+					Fork:                  true,
+					ForceMapping:          true,
+					ToThinking:            " claude-opus-4-5-thinking ",
+					ToNonThinking:         " claude-opus-4-5 ",
+					StripThinkingResponse: true,
+				},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	aliases := cfg.OAuthModelAlias["antigravity"]
+	if len(aliases) != 1 {
+		t.Fatalf("expected 1 sanitized alias, got %d", len(aliases))
+	}
+	got := aliases[0]
+	if got.Name != "claude-opus-4-5-thinking" || got.Alias != "claude-opus-4-5" || !got.ForceMapping {
+		t.Fatalf("expected alias to be normalized with force-mapping, got name=%q alias=%q force=%v", got.Name, got.Alias, got.ForceMapping)
+	}
+	if got.ToThinking != "claude-opus-4-5-thinking" || got.ToNonThinking != "claude-opus-4-5" {
+		t.Fatalf("expected thinking routing fields to be trimmed, got toThinking=%q toNonThinking=%q", got.ToThinking, got.ToNonThinking)
+	}
+	if !got.StripThinkingResponse {
+		t.Fatalf("expected strip-thinking-response to be preserved")
+	}
+}

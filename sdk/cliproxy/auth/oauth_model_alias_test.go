@@ -175,3 +175,43 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestApplyOAuthModelAliasWithThinking(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"antigravity": {{
+			Name:                  "claude-opus-4-5-thinking",
+			Alias:                 "claude-opus-4-5",
+			ForceMapping:          true,
+			ToThinking:            "claude-opus-4-5-thinking",
+			ToNonThinking:         "claude-opus-4-5-thinking",
+			StripThinkingResponse: true,
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := createAuthForChannel("antigravity")
+
+	thinkingResult := mgr.applyOAuthModelAliasWithThinking(auth, "claude-opus-4-5", true)
+	if thinkingResult.UpstreamModel != "claude-opus-4-5-thinking" {
+		t.Fatalf("thinking mapping upstream = %q, want %q", thinkingResult.UpstreamModel, "claude-opus-4-5-thinking")
+	}
+	if !thinkingResult.ForceMapping || thinkingResult.OriginalAlias != "claude-opus-4-5" {
+		t.Fatalf("expected force-mapping metadata preserved for thinking request, got force=%v alias=%q", thinkingResult.ForceMapping, thinkingResult.OriginalAlias)
+	}
+	if thinkingResult.StripThinkingResponse {
+		t.Fatalf("did not expect strip-thinking-response for thinking request")
+	}
+
+	nonThinkingResult := mgr.applyOAuthModelAliasWithThinking(auth, "claude-opus-4-5", false)
+	if nonThinkingResult.UpstreamModel != "claude-opus-4-5-thinking" {
+		t.Fatalf("non-thinking mapping upstream = %q, want %q", nonThinkingResult.UpstreamModel, "claude-opus-4-5-thinking")
+	}
+	if !nonThinkingResult.StripThinkingResponse {
+		t.Fatalf("expected strip-thinking-response for non-thinking request")
+	}
+}

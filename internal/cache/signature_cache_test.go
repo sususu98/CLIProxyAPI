@@ -13,10 +13,10 @@ func TestCacheSignature_BasicStorageAndRetrieval(t *testing.T) {
 	signature := "abc123validSignature1234567890123456789012345678901234567890"
 
 	// Store signature
-	CacheSignature(sessionID, text, signature)
+	CacheSignature("claude-sonnet-4-5", sessionID, text, signature)
 
 	// Retrieve signature
-	retrieved := GetCachedSignature(sessionID, text)
+	retrieved := GetCachedSignature("claude-sonnet-4-5", sessionID, text)
 	if retrieved != signature {
 		t.Errorf("Expected signature '%s', got '%s'", signature, retrieved)
 	}
@@ -29,13 +29,13 @@ func TestCacheSignature_DifferentSessions(t *testing.T) {
 	sig1 := "signature1_1234567890123456789012345678901234567890123456"
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
-	CacheSignature("session-a", text, sig1)
-	CacheSignature("session-b", text, sig2)
+	CacheSignature("claude-sonnet-4-5", "session-a", text, sig1)
+	CacheSignature("claude-sonnet-4-5", "session-b", text, sig2)
 
-	if GetCachedSignature("session-a", text) != sig1 {
+	if GetCachedSignature("claude-sonnet-4-5", "session-a", text) != sig1 {
 		t.Error("Session-a signature mismatch")
 	}
-	if GetCachedSignature("session-b", text) != sig2 {
+	if GetCachedSignature("claude-sonnet-4-5", "session-b", text) != sig2 {
 		t.Error("Session-b signature mismatch")
 	}
 }
@@ -44,13 +44,13 @@ func TestCacheSignature_NotFound(t *testing.T) {
 	ClearSignatureCache("")
 
 	// Non-existent session
-	if got := GetCachedSignature("nonexistent", "some text"); got != "" {
+	if got := GetCachedSignature("claude-sonnet-4-5", "nonexistent", "some text"); got != "" {
 		t.Errorf("Expected empty string for nonexistent session, got '%s'", got)
 	}
 
 	// Existing session but different text
-	CacheSignature("session-x", "text-a", "sigA12345678901234567890123456789012345678901234567890")
-	if got := GetCachedSignature("session-x", "text-b"); got != "" {
+	CacheSignature("claude-sonnet-4-5", "session-x", "text-a", "sigA12345678901234567890123456789012345678901234567890")
+	if got := GetCachedSignature("claude-sonnet-4-5", "session-x", "text-b"); got != "" {
 		t.Errorf("Expected empty string for different text, got '%s'", got)
 	}
 }
@@ -59,12 +59,12 @@ func TestCacheSignature_EmptyInputs(t *testing.T) {
 	ClearSignatureCache("")
 
 	// All empty/invalid inputs should be no-ops
-	CacheSignature("", "text", "sig12345678901234567890123456789012345678901234567890")
-	CacheSignature("session", "", "sig12345678901234567890123456789012345678901234567890")
-	CacheSignature("session", "text", "")
-	CacheSignature("session", "text", "short") // Too short
+	CacheSignature("claude-sonnet-4-5", "", "text", "sig12345678901234567890123456789012345678901234567890")
+	CacheSignature("claude-sonnet-4-5", "session", "", "sig12345678901234567890123456789012345678901234567890")
+	CacheSignature("claude-sonnet-4-5", "session", "text", "")
+	CacheSignature("claude-sonnet-4-5", "session", "text", "short") // Too short
 
-	if got := GetCachedSignature("session", "text"); got != "" {
+	if got := GetCachedSignature("claude-sonnet-4-5", "session", "text"); got != "" {
 		t.Errorf("Expected empty after invalid cache attempts, got '%s'", got)
 	}
 }
@@ -76,9 +76,9 @@ func TestCacheSignature_ShortSignatureRejected(t *testing.T) {
 	text := "Some text"
 	shortSig := "abc123" // Less than 50 chars
 
-	CacheSignature(sessionID, text, shortSig)
+	CacheSignature("claude-sonnet-4-5", sessionID, text, shortSig)
 
-	if got := GetCachedSignature(sessionID, text); got != "" {
+	if got := GetCachedSignature("claude-sonnet-4-5", sessionID, text); got != "" {
 		t.Errorf("Short signature should be rejected, got '%s'", got)
 	}
 }
@@ -87,15 +87,15 @@ func TestClearSignatureCache_SpecificSession(t *testing.T) {
 	ClearSignatureCache("")
 
 	sig := "validSig1234567890123456789012345678901234567890123456"
-	CacheSignature("session-1", "text", sig)
-	CacheSignature("session-2", "text", sig)
+	CacheSignature("claude-sonnet-4-5", "session-1", "text", sig)
+	CacheSignature("claude-sonnet-4-5", "session-2", "text", sig)
 
-	ClearSignatureCache("session-1")
+	ClearSignatureCache("claude#session-1")
 
-	if got := GetCachedSignature("session-1", "text"); got != "" {
+	if got := GetCachedSignature("claude-sonnet-4-5", "session-1", "text"); got != "" {
 		t.Error("session-1 should be cleared")
 	}
-	if got := GetCachedSignature("session-2", "text"); got != sig {
+	if got := GetCachedSignature("claude-sonnet-4-5", "session-2", "text"); got != sig {
 		t.Error("session-2 should still exist")
 	}
 }
@@ -104,15 +104,15 @@ func TestClearSignatureCache_AllSessions(t *testing.T) {
 	ClearSignatureCache("")
 
 	sig := "validSig1234567890123456789012345678901234567890123456"
-	CacheSignature("session-1", "text", sig)
-	CacheSignature("session-2", "text", sig)
+	CacheSignature("claude-sonnet-4-5", "session-1", "text", sig)
+	CacheSignature("claude-sonnet-4-5", "session-2", "text", sig)
 
 	ClearSignatureCache("")
 
-	if got := GetCachedSignature("session-1", "text"); got != "" {
+	if got := GetCachedSignature("claude-sonnet-4-5", "session-1", "text"); got != "" {
 		t.Error("session-1 should be cleared")
 	}
-	if got := GetCachedSignature("session-2", "text"); got != "" {
+	if got := GetCachedSignature("claude-sonnet-4-5", "session-2", "text"); got != "" {
 		t.Error("session-2 should be cleared")
 	}
 }
@@ -151,13 +151,13 @@ func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 	sig1 := "signature1_1234567890123456789012345678901234567890123456"
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
-	CacheSignature(sessionID, text1, sig1)
-	CacheSignature(sessionID, text2, sig2)
+	CacheSignature("claude-sonnet-4-5", sessionID, text1, sig1)
+	CacheSignature("claude-sonnet-4-5", sessionID, text2, sig2)
 
-	if GetCachedSignature(sessionID, text1) != sig1 {
+	if GetCachedSignature("claude-sonnet-4-5", sessionID, text1) != sig1 {
 		t.Error("text1 signature mismatch")
 	}
-	if GetCachedSignature(sessionID, text2) != sig2 {
+	if GetCachedSignature("claude-sonnet-4-5", sessionID, text2) != sig2 {
 		t.Error("text2 signature mismatch")
 	}
 }
@@ -169,9 +169,9 @@ func TestCacheSignature_UnicodeText(t *testing.T) {
 	text := "한글 텍스트와 이모지 🎉 그리고 特殊文字"
 	sig := "unicodeSig123456789012345678901234567890123456789012345"
 
-	CacheSignature(sessionID, text, sig)
+	CacheSignature("claude-sonnet-4-5", sessionID, text, sig)
 
-	if got := GetCachedSignature(sessionID, text); got != sig {
+	if got := GetCachedSignature("claude-sonnet-4-5", sessionID, text); got != sig {
 		t.Errorf("Unicode text signature retrieval failed, got '%s'", got)
 	}
 }
@@ -184,10 +184,10 @@ func TestCacheSignature_Overwrite(t *testing.T) {
 	sig1 := "firstSignature12345678901234567890123456789012345678901"
 	sig2 := "secondSignature1234567890123456789012345678901234567890"
 
-	CacheSignature(sessionID, text, sig1)
-	CacheSignature(sessionID, text, sig2) // Overwrite
+	CacheSignature("claude-sonnet-4-5", sessionID, text, sig1)
+	CacheSignature("claude-sonnet-4-5", sessionID, text, sig2) // Overwrite
 
-	if got := GetCachedSignature(sessionID, text); got != sig2 {
+	if got := GetCachedSignature("claude-sonnet-4-5", sessionID, text); got != sig2 {
 		t.Errorf("Expected overwritten signature '%s', got '%s'", sig2, got)
 	}
 }
@@ -203,10 +203,10 @@ func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	text := "text"
 	sig := "validSig1234567890123456789012345678901234567890123456"
 
-	CacheSignature(sessionID, text, sig)
+	CacheSignature("claude-sonnet-4-5", sessionID, text, sig)
 
 	// Fresh entry should be retrievable
-	if got := GetCachedSignature(sessionID, text); got != sig {
+	if got := GetCachedSignature("claude-sonnet-4-5", sessionID, text); got != sig {
 		t.Errorf("Fresh entry should be retrievable, got '%s'", got)
 	}
 
