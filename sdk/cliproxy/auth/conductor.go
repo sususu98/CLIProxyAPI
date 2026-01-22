@@ -666,6 +666,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if aliasResult.StripThinkingResponse {
 			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
 		}
+		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
+			resp.Payload = rewriteModelInResponse(resp.Payload, aliasResult.OriginalAlias)
+		}
 		return resp, nil
 	}
 }
@@ -793,13 +796,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
 		stripThinking := aliasResult.StripThinkingResponse
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool) {
+		rewriteModel := ""
+		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
+			rewriteModel = aliasResult.OriginalAlias
+		}
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool, modelToRewrite string) {
 			defer close(out)
 			var failed bool
 			forward := true
 			var rewriter *StreamRewriter
-			if doStripThinking {
-				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking})
+			if doStripThinking || modelToRewrite != "" {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking, RewriteModel: modelToRewrite})
 			}
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
@@ -832,7 +839,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, streamResult.Chunks, stripThinking)
+		}(execCtx, auth.Clone(), provider, streamResult.Chunks, stripThinking, rewriteModel)
 		return &cliproxyexecutor.StreamResult{
 			Headers: streamResult.Headers,
 			Chunks:  out,
@@ -961,6 +968,9 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		if aliasResult.StripThinkingResponse {
 			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
 		}
+		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
+			resp.Payload = rewriteModelInResponse(resp.Payload, aliasResult.OriginalAlias)
+		}
 		return resp, nil
 	}
 }
@@ -1062,12 +1072,16 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
 		stripThinking := aliasResult.StripThinkingResponse
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool) {
+		rewriteModel := ""
+		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
+			rewriteModel = aliasResult.OriginalAlias
+		}
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool, modelToRewrite string) {
 			defer close(out)
 			var failed bool
 			var rewriter *StreamRewriter
-			if doStripThinking {
-				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking})
+			if doStripThinking || modelToRewrite != "" {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking, RewriteModel: modelToRewrite})
 			}
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
@@ -1089,7 +1103,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks, stripThinking)
+		}(execCtx, auth.Clone(), provider, chunks, stripThinking, rewriteModel)
 		return out, nil
 	}
 }
