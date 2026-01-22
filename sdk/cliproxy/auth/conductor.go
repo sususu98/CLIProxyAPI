@@ -592,7 +592,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
@@ -610,6 +612,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		m.MarkResult(execCtx, result)
+		if aliasResult.StripThinkingResponse {
+			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
+		}
 		return resp, nil
 	}
 }
@@ -641,7 +646,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
@@ -690,7 +697,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
@@ -706,9 +715,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
+		stripThinking := aliasResult.StripThinkingResponse
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool) {
 			defer close(out)
 			var failed bool
+			var rewriter *StreamRewriter
+			if doStripThinking {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking})
+			}
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
 					failed = true
@@ -719,12 +733,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
 				}
-				out <- chunk
+				if rewriter != nil && chunk.Payload != nil {
+					chunk.Payload = rewriter.RewriteChunk(chunk.Payload)
+				}
+				if chunk.Payload != nil || chunk.Err != nil {
+					out <- chunk
+				}
 			}
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks)
+		}(execCtx, auth.Clone(), provider, chunks, stripThinking)
 		return out, nil
 	}
 }
@@ -756,7 +775,9 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
@@ -774,6 +795,9 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			continue
 		}
 		m.MarkResult(execCtx, result)
+		if aliasResult.StripThinkingResponse {
+			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
+		}
 		return resp, nil
 	}
 }
@@ -805,7 +829,9 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
@@ -854,7 +880,9 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
@@ -870,9 +898,14 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
+		stripThinking := aliasResult.StripThinkingResponse
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool) {
 			defer close(out)
 			var failed bool
+			var rewriter *StreamRewriter
+			if doStripThinking {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking})
+			}
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
 					failed = true
@@ -883,12 +916,17 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
 				}
-				out <- chunk
+				if rewriter != nil && chunk.Payload != nil {
+					chunk.Payload = rewriter.RewriteChunk(chunk.Payload)
+				}
+				if chunk.Payload != nil || chunk.Err != nil {
+					out <- chunk
+				}
 			}
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks)
+		}(execCtx, auth.Clone(), provider, chunks, stripThinking)
 		return out, nil
 	}
 }
