@@ -244,3 +244,120 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 		t.Error("Second thinking block signature should be cached")
 	}
 }
+
+func TestDeriveSessionIDFromRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     []byte
+		wantEmpty bool
+	}{
+		{
+			name:      "valid user message",
+			input:     []byte(`{"messages": [{"role": "user", "content": "Hello"}]}`),
+			wantEmpty: false,
+		},
+		{
+			name:      "user message with content array",
+			input:     []byte(`{"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]}`),
+			wantEmpty: false,
+		},
+		{
+			name:      "no user message",
+			input:     []byte(`{"messages": [{"role": "assistant", "content": "Hi"}]}`),
+			wantEmpty: true,
+		},
+		{
+			name:      "empty messages",
+			input:     []byte(`{"messages": []}`),
+			wantEmpty: true,
+		},
+		{
+			name:      "no messages field",
+			input:     []byte(`{}`),
+			wantEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := deriveSessionID(tt.input)
+			if tt.wantEmpty && result != "" {
+				t.Errorf("Expected empty session ID, got '%s'", result)
+			}
+			if !tt.wantEmpty && result == "" {
+				t.Error("Expected non-empty session ID")
+			}
+		})
+	}
+}
+
+func TestDeriveSessionIDFromRequest_Deterministic(t *testing.T) {
+	input := []byte(`{"messages": [{"role": "user", "content": "Same message"}]}`)
+
+	id1 := deriveSessionID(input)
+	id2 := deriveSessionID(input)
+
+	if id1 != id2 {
+		t.Errorf("Session ID should be deterministic: '%s' != '%s'", id1, id2)
+	}
+}
+
+func TestDeriveSessionIDFromRequest_DifferentMessages(t *testing.T) {
+	input1 := []byte(`{"messages": [{"role": "user", "content": "Message A"}]}`)
+	input2 := []byte(`{"messages": [{"role": "user", "content": "Message B"}]}`)
+
+	id1 := deriveSessionID(input1)
+	id2 := deriveSessionID(input2)
+
+	if id1 == id2 {
+		t.Error("Different messages should produce different session IDs")
+	}
+}
+
+func TestDeriveSessionID_ClaudeCodeFormat(t *testing.T) {
+	// Claude Code metadata.user_id with _session_ format should have highest priority
+	input := []byte(`{
+		"metadata": {"user_id": "user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"},
+		"messages": [{"role": "user", "content": "Hello"}]
+	}`)
+
+	result := deriveSessionID(input)
+	expected := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
+
+	if result != expected {
+		t.Errorf("deriveSessionID() = '%s', want '%s'", result, expected)
+	}
+}
+
+func TestDeriveSessionID_ClaudeCodePriorityOverMessages(t *testing.T) {
+	// Claude Code session should be used even when messages are present
+	input := []byte(`{
+		"metadata": {"user_id": "user_xxx_account__session_12345678-1234-1234-1234-123456789abc"},
+		"messages": [{"role": "user", "content": "Hello world"}]
+	}`)
+
+	result := deriveSessionID(input)
+
+	// Should use Claude session format, not message hash
+	if result == "" {
+		t.Error("Expected non-empty session ID")
+	}
+	if !strings.HasPrefix(result, "claude:") {
+		t.Errorf("deriveSessionID() = '%s', should start with 'claude:' prefix", result)
+	}
+}
+
+func TestDeriveSessionID_FallbackToUserID(t *testing.T) {
+	// Non-Claude Code user_id should be used as fallback
+	input := []byte(`{
+		"metadata": {"user_id": "custom_user_123"},
+		"messages": [{"role": "user", "content": "Hello"}]
+	}`)
+
+	result := deriveSessionID(input)
+	expected := "user:custom_user_123"
+
+	if result != expected {
+		t.Errorf("deriveSessionID() = '%s', want '%s'", result, expected)
+	}
+}
