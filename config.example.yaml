@@ -248,11 +248,56 @@ nonstream-keepalive-interval: 0
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # You can repeat the same name with different aliases to expose multiple client model names.
-# oauth-model-alias:
+#
+# Options:
+#   name: upstream model name
+#   alias: client-visible alias name
+#   fork: when true, keep original model AND add alias as extra model (default: false)
+#   force-mapping: when true, rewrite model name in responses to match the alias (default: false)
+#
+# Thinking-aware mapping (for routing based on whether thinking mode is enabled):
+#   to-thinking: target model for requests with thinking.type=enabled
+#   to-non-thinking: target model for requests without thinking enabled
+#   strip-thinking-response: remove thinking blocks from response (useful when
+#     routing non-thinking requests to a thinking-only model)
+oauth-model-alias:
+  antigravity:
+    - name: "rev19-uic3-1p"
+      alias: "gemini-2.5-computer-use-preview-10-2025"
+    - name: "gemini-3-pro-image"
+      alias: "gemini-3-pro-image-preview"
+    - name: "gemini-3-pro-high"
+      alias: "gemini-3-pro-preview"
+    - name: "gemini-3-flash"
+      alias: "gemini-3-flash-preview"
+    - name: "claude-sonnet-4-5"
+      alias: "gemini-claude-sonnet-4-5"
+      fork: true
+      force-mapping: true
+    - name: "claude-sonnet-4-5-thinking"
+      alias: "gemini-claude-sonnet-4-5-thinking"
+      fork: true
+      force-mapping: true
+    - name: "claude-opus-4-5-thinking"
+      alias: "gemini-claude-opus-4-5-thinking"
+      fork: true
+      force-mapping: true
+#
+#     # Thinking-aware mapping example: route to different models based on thinking mode
+#     - name: "claude-sonnet-4-5-thinking"
+#       alias: "claude-sonnet-4-5"
+#       to-thinking: "claude-sonnet-4-5-thinking"
+#       to-non-thinking: "claude-sonnet-4-5"
+#
+#     # Thinking-aware mapping: Opus only has thinking model available
+#     - name: "claude-opus-4-5-thinking"
+#       alias: "claude-opus-4-5"
+#       strip-thinking-response: true
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
 #       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
+#       force-mapping: true             # when true, responses show alias instead of upstream model name (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
