@@ -41,6 +41,7 @@ type Params struct {
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
 
 	// Signature caching support
+	SessionID           string          // Session ID derived from request for signature caching
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
 }
 
@@ -69,6 +70,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
+			SessionID:        deriveSessionID(originalRequestRawJSON),
 		}
 	}
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
