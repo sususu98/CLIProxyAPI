@@ -600,7 +600,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
@@ -621,6 +623,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		m.MarkResult(execCtx, result)
+		if aliasResult.StripThinkingResponse {
+			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
+		}
 		return resp, nil
 	}
 }
@@ -653,7 +658,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
@@ -706,7 +713,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
@@ -725,9 +734,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
+		stripThinking := aliasResult.StripThinkingResponse
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool) {
 			defer close(out)
 			var failed bool
+			var rewriter *StreamRewriter
+			if doStripThinking {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking})
+			}
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
 					failed = true
@@ -738,12 +752,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
 				}
-				out <- chunk
+				if rewriter != nil && chunk.Payload != nil {
+					chunk.Payload = rewriter.RewriteChunk(chunk.Payload)
+				}
+				if chunk.Payload != nil || chunk.Err != nil {
+					out <- chunk
+				}
 			}
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks)
+		}(execCtx, auth.Clone(), provider, chunks, stripThinking)
 		return out, nil
 	}
 }
@@ -784,6 +803,189 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 		return strings.TrimSpace(string(v)) != ""
 	default:
 		return false
+	}
+}
+
+func (m *Manager) executeWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if provider == "" {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+	}
+	routeModel := req.Model
+	tried := make(map[string]struct{})
+	var lastErr error
+	for {
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		if errPick != nil {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, req.Model)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
+		if errExec != nil {
+			result.Error = &Error{Message: errExec.Error()}
+			var se cliproxyexecutor.StatusError
+			if errors.As(errExec, &se) && se != nil {
+				result.Error.HTTPStatus = se.StatusCode()
+			}
+			if ra := retryAfterFromError(errExec); ra != nil {
+				result.RetryAfter = ra
+			}
+			m.MarkResult(execCtx, result)
+			lastErr = errExec
+			continue
+		}
+		m.MarkResult(execCtx, result)
+		if aliasResult.StripThinkingResponse {
+			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
+		}
+		return resp, nil
+	}
+}
+
+func (m *Manager) executeCountWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if provider == "" {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+	}
+	routeModel := req.Model
+	tried := make(map[string]struct{})
+	var lastErr error
+	for {
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		if errPick != nil {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, req.Model)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
+		if errExec != nil {
+			result.Error = &Error{Message: errExec.Error()}
+			var se cliproxyexecutor.StatusError
+			if errors.As(errExec, &se) && se != nil {
+				result.Error.HTTPStatus = se.StatusCode()
+			}
+			if ra := retryAfterFromError(errExec); ra != nil {
+				result.RetryAfter = ra
+			}
+			m.MarkResult(execCtx, result)
+			lastErr = errExec
+			continue
+		}
+		m.MarkResult(execCtx, result)
+		return resp, nil
+	}
+}
+
+func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	if provider == "" {
+		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+	}
+	routeModel := req.Model
+	tried := make(map[string]struct{})
+	var lastErr error
+	for {
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		if errPick != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, req.Model)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
+		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		execReq.Model = aliasResult.UpstreamModel
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
+		if errStream != nil {
+			rerr := &Error{Message: errStream.Error()}
+			var se cliproxyexecutor.StatusError
+			if errors.As(errStream, &se) && se != nil {
+				rerr.HTTPStatus = se.StatusCode()
+			}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+			result.RetryAfter = retryAfterFromError(errStream)
+			m.MarkResult(execCtx, result)
+			lastErr = errStream
+			continue
+		}
+		out := make(chan cliproxyexecutor.StreamChunk)
+		stripThinking := aliasResult.StripThinkingResponse
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool) {
+			defer close(out)
+			var failed bool
+			var rewriter *StreamRewriter
+			if doStripThinking {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking})
+			}
+			for chunk := range streamChunks {
+				if chunk.Err != nil && !failed {
+					failed = true
+					rerr := &Error{Message: chunk.Err.Error()}
+					var se cliproxyexecutor.StatusError
+					if errors.As(chunk.Err, &se) && se != nil {
+						rerr.HTTPStatus = se.StatusCode()
+					}
+					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
+				}
+				if rewriter != nil && chunk.Payload != nil {
+					chunk.Payload = rewriter.RewriteChunk(chunk.Payload)
+				}
+				if chunk.Payload != nil || chunk.Err != nil {
+					out <- chunk
+				}
+			}
+			if !failed {
+				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
+			}
+		}(execCtx, auth.Clone(), provider, chunks, stripThinking)
+		return out, nil
 	}
 }
 
