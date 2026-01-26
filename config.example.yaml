@@ -109,6 +109,12 @@ nonstream-keepalive-interval: 0
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
+# Signature cache validation for thinking blocks (Antigravity/Claude).
+# When true (default), cached signatures are preferred and validated.
+# When false, client signatures are used directly after normalization (bypass mode for testing).
+# antigravity-signature-cache-enabled: true
+
+
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
