@@ -127,6 +127,7 @@ type Manager struct {
 	// Retry controls request retry behavior.
 	requestRetry     atomic.Int32
 	maxRetryInterval atomic.Int64
+	maxAuthRotations atomic.Int32
 
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
@@ -384,6 +385,17 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration) {
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// SetMaxAuthRotations updates the maximum number of auth credential rotations.
+func (m *Manager) SetMaxAuthRotations(maxRotations int) {
+	if m == nil {
+		return
+	}
+	if maxRotations < 0 {
+		maxRotations = 0
+	}
+	m.maxAuthRotations.Store(int32(maxRotations))
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
@@ -570,7 +582,18 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	maxAuthRotations := m.maxAuthRotationsLimit()
+	if maxAuthRotations < 1 {
+		maxAuthRotations = 1
+	}
+	authRotationCount := 0
 	for {
+		if authRotationCount >= maxAuthRotations {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, &Error{Code: "auth_rotation_limit", Message: "max auth rotations reached"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -608,6 +631,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			authRotationCount++
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -623,7 +647,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	maxAuthRotations := m.maxAuthRotationsLimit()
+	if maxAuthRotations < 1 {
+		maxAuthRotations = 1
+	}
+	authRotationCount := 0
 	for {
+		if authRotationCount >= maxAuthRotations {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, &Error{Code: "auth_rotation_limit", Message: "max auth rotations reached"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -661,6 +696,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			authRotationCount++
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -676,7 +712,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	maxAuthRotations := m.maxAuthRotationsLimit()
+	if maxAuthRotations < 1 {
+		maxAuthRotations = 1
+	}
+	authRotationCount := 0
 	for {
+		if authRotationCount >= maxAuthRotations {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, &Error{Code: "auth_rotation_limit", Message: "max auth rotations reached"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -712,6 +759,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
+			authRotationCount++
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -1041,6 +1089,17 @@ func (m *Manager) retrySettings() (int, time.Duration) {
 		return 0, 0
 	}
 	return int(m.requestRetry.Load()), time.Duration(m.maxRetryInterval.Load())
+}
+
+func (m *Manager) maxAuthRotationsLimit() int {
+	if m == nil {
+		return 0
+	}
+	limit := int(m.maxAuthRotations.Load())
+	if limit > 0 {
+		return limit
+	}
+	return int(m.requestRetry.Load())
 }
 
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {

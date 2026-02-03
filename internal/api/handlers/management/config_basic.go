@@ -272,6 +272,14 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
 }
 
+// Max auth rotations
+func (h *Handler) GetMaxAuthRotations(c *gin.Context) {
+	c.JSON(200, gin.H{"max-auth-rotations": h.cfg.MaxAuthRotations})
+}
+func (h *Handler) PutMaxAuthRotations(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.MaxAuthRotations = v })
+}
+
 // ForceModelPrefix
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})

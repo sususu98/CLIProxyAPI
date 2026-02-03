@@ -252,6 +252,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
+		authManager.SetMaxAuthRotations(cfg.MaxAuthRotations)
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -570,6 +571,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+
+		mgmt.GET("/max-auth-rotations", s.mgmt.GetMaxAuthRotations)
+		mgmt.PUT("/max-auth-rotations", s.mgmt.PutMaxAuthRotations)
+		mgmt.PATCH("/max-auth-rotations", s.mgmt.PutMaxAuthRotations)
 
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
@@ -900,6 +905,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
+		s.handlers.AuthManager.SetMaxAuthRotations(cfg.MaxAuthRotations)
 	}
 
 	// Update log level dynamically when debug flag changes

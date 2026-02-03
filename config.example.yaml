@@ -63,11 +63,38 @@ proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
-# Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
+# Retry behavior for API requests (3-tier architecture):
+#
+# TIER 1 - Executor-level retry (within single credential):
+#   Some executors (e.g., Antigravity) retry internally before returning error.
+#   They may switch base URLs or handle "no capacity" errors with backoff.
+#   Controlled by: request-retry (for Antigravity), varies by executor.
+#   Note: Gemini CLI only does model fallback on 429, doesn't use request-retry.
+#
+# TIER 2 - Auth rotation (switching credentials):
+#   When an executor fails, the conductor immediately tries the next credential.
+#   This is a fast, no-wait rotation through available accounts.
+#   Controlled by: max-auth-rotations (defaults to request-retry if unset)
+#
+# TIER 3 - Global retry with cooldown (wait and retry all):
+#   Only triggers when: (1) credentials have cooldown timers AND (2) max-retry-interval > 0
+#   Waits for the shortest cooldown, then restarts the rotation cycle.
+#   Controlled by: request-retry (attempt count) + max-retry-interval (max wait)
+#   Note: Set max-retry-interval=0 to disable Tier 3 entirely.
+#
+# request-retry: Affects Tier 1 (Antigravity internal) + Tier 3 (global retry).
+#   Also serves as DEFAULT for Tier 2 if max-auth-rotations is not set.
 request-retry: 3
 
-# Maximum wait time in seconds for a cooled-down credential before triggering a retry.
+# Maximum wait time in seconds for a cooled-down credential before triggering Tier 3.
+# Set to 0 to disable global cooldown retry entirely.
 max-retry-interval: 30
+
+# max-auth-rotations: Controls Tier 2 - how many DIFFERENT credentials to try.
+#   Limits the number of account switches in a single rotation cycle.
+#   Example: With 8 OAuth accounts and max-auth-rotations=3, only 3 accounts are tried.
+#   Set to 0 to use request-retry value as fallback (minimum 1 attempt guaranteed).
+max-auth-rotations: 3
 
 # Quota exceeded behavior
 quota-exceeded:
