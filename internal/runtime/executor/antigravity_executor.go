@@ -1393,21 +1393,51 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high")
+	// Clean and rename tool schemas: parametersJsonSchema -> parameters
+	// PERF: Clean each schema individually for cache efficiency. Full payload cleaning
+	// always misses cache due to dynamic content (messages, timestamps).
+	isClaudeOrG3High := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high")
 	payloadStr := string(payload)
-	paths := make([]string, 0)
-	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
-	for _, p := range paths {
-		payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+	{
+		paths := make([]string, 0)
+		util.Walk(gjson.ParseBytes(payload), "", "parametersJsonSchema", &paths)
+
+		if len(paths) > 0 {
+			const suffix = "parametersJsonSchema"
+
+			for _, p := range paths {
+				schemaRaw := gjson.Get(payloadStr, p).Raw
+				newPath := p[:len(p)-len(suffix)] + "parameters"
+
+				if schemaRaw == "" || schemaRaw == "null" {
+					if renamed, err := util.RenameKey(payloadStr, p, newPath); err == nil {
+						payloadStr = renamed
+					}
+					continue
+				}
+
+				var cleanedSchema string
+				if isClaudeOrG3High {
+					cleanedSchema = util.CleanJSONSchemaForAntigravity(schemaRaw)
+				} else {
+					cleanedSchema = util.CleanJSONSchemaForGemini(schemaRaw)
+				}
+
+				// Atomic: apply both SetRaw and Delete only if both succeed
+				updated, err := sjson.SetRaw(payloadStr, newPath, cleanedSchema)
+				if err != nil {
+					continue
+				}
+				updated, err = sjson.Delete(updated, p)
+				if err != nil {
+					continue
+				}
+				payloadStr = updated
+			}
+		}
 	}
 
-	if useAntigravitySchema {
-		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
-	} else {
-		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
-	}
-
-	if useAntigravitySchema {
+	if isClaudeOrG3High {
 		systemInstructionPartsResult := gjson.Get(payloadStr, "request.systemInstruction.parts")
 		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.role", "user")
 		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.0.text", systemInstruction)

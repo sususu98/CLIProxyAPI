@@ -3,9 +3,12 @@ package util
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -15,17 +18,52 @@ var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?
 
 const placeholderReasonDescription = "Brief explanation of why you are calling this tool"
 
+const schemaCacheMaxSize = 5000
+
+var (
+	schemaCache      sync.Map
+	schemaCacheCount atomic.Int64
+)
+
+type schemaCacheKey struct {
+	hash           uint64
+	addPlaceholder bool
+}
+
+func hashSchema(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
+}
+
 // CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
 // semantic information as description hints.
 func CleanJSONSchemaForAntigravity(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, true)
+	return cleanJSONSchemaCached(jsonStr, true)
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
 // It removes unsupported keywords and simplifies schemas, without adding empty-schema placeholders.
 func CleanJSONSchemaForGemini(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, false)
+	return cleanJSONSchemaCached(jsonStr, false)
+}
+
+func cleanJSONSchemaCached(jsonStr string, addPlaceholder bool) string {
+	if jsonStr == "" {
+		return jsonStr
+	}
+	key := schemaCacheKey{hash: hashSchema(jsonStr), addPlaceholder: addPlaceholder}
+	if cached, ok := schemaCache.Load(key); ok {
+		return cached.(string)
+	}
+	result := cleanJSONSchema(jsonStr, addPlaceholder)
+	if schemaCacheCount.Load() < schemaCacheMaxSize {
+		if _, loaded := schemaCache.LoadOrStore(key, result); !loaded {
+			schemaCacheCount.Add(1)
+		}
+	}
+	return result
 }
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.

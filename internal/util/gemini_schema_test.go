@@ -1046,3 +1046,36 @@ func TestRemoveExtensionFields(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanJSONSchema_CacheConsistency(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": ["string", "null"]},
+			"count": {"type": "integer", "minimum": 0}
+		},
+		"additionalProperties": false
+	}`
+
+	// First call - populates cache
+	result1 := CleanJSONSchemaForAntigravity(input)
+	// Second call - should hit cache
+	result2 := CleanJSONSchemaForAntigravity(input)
+
+	if result1 != result2 {
+		t.Errorf("Cache returned different result:\nFirst:  %s\nSecond: %s", result1, result2)
+	}
+
+	// Verify Gemini variant also works
+	gemini1 := CleanJSONSchemaForGemini(input)
+	gemini2 := CleanJSONSchemaForGemini(input)
+
+	if gemini1 != gemini2 {
+		t.Errorf("Gemini cache returned different result:\nFirst:  %s\nSecond: %s", gemini1, gemini2)
+	}
+
+	// Antigravity and Gemini should differ (different addPlaceholder flag)
+	if result1 == gemini1 {
+		t.Log("Note: Antigravity and Gemini results are identical for this input (may be expected)")
+	}
+}
