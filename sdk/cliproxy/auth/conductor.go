@@ -1753,8 +1753,8 @@ func statusCodeFromResult(err *Error) int {
 
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it checks for 400 Bad Request
-// with "invalid_request_error" in the message, indicating the request itself is
-// malformed and switching to a different auth will not help.
+// with "invalid_request_error" or "INVALID_ARGUMENT" in the message, indicating
+// the request itself is malformed and switching to a different auth will not help.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -1763,7 +1763,9 @@ func isRequestInvalidError(err error) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
-	return strings.Contains(err.Error(), "invalid_request_error")
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "invalid_request_error") ||
+		strings.Contains(errMsg, "INVALID_ARGUMENT")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
