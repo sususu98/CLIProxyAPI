@@ -304,6 +304,26 @@ type PayloadFilterRule struct {
 	Models []PayloadModelRule `yaml:"models" json:"models"`
 	// Params lists JSON paths (gjson/sjson syntax) to remove from the payload.
 	Params []string `yaml:"params" json:"params"`
+	// ArrayElementFilter filters elements from arrays based on content matching.
+	// Elements matching any of the specified conditions will be removed.
+	ArrayElementFilter []ArrayElementFilter `yaml:"array-element-filter,omitempty" json:"array-element-filter,omitempty"`
+}
+
+// ArrayElementFilter defines a filter condition for array elements.
+type ArrayElementFilter struct {
+	// Path is the JSON path to the array (relative to root, e.g., "tools" or "generationConfig.tools").
+	Path string `yaml:"path" json:"path"`
+	// Match specifies the condition for elements to be filtered out.
+	Match ElementMatch `yaml:"match" json:"match"`
+}
+
+// ElementMatch defines matching criteria for array element filtering.
+type ElementMatch struct {
+	// Key is the object key that must exist in the element for it to be filtered.
+	Key string `yaml:"key" json:"key"`
+	// Value optionally specifies the value that the key must have for the element to be filtered.
+	// If omitted, any element containing the key will be filtered (has-key semantics).
+	Value any `yaml:"value,omitempty" json:"value,omitempty"`
 }
 
 // PayloadRule describes a single rule targeting a list of models with parameter updates.

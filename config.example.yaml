@@ -386,3 +386,8 @@ oauth-model-alias:
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+#       array-element-filter: # Filter array elements by content (removes elements matching the condition)
+#         - path: "tools" # JSON path to the array
+#           match:
+#             key: "googleSearch" # Remove elements containing this key
+#             # value: {} # Optional: only remove if key has this exact value (omit for has-key semantics)
