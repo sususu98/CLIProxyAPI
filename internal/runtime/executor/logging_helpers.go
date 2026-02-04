@@ -90,22 +90,26 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
 
+	// Only include body in first request to avoid redundant logging on retries
 	var storedBody []byte
-	if requestLogEnabled {
-		builder.WriteString("\nBody:\n")
-		if len(info.Body) > 0 {
-			builder.WriteString(string(info.Body))
+	isFirstRequest := len(attempts) == 0
+	if isFirstRequest {
+		if requestLogEnabled {
+			builder.WriteString("\nBody:\n")
+			if len(info.Body) > 0 {
+				builder.WriteString(string(info.Body))
+			} else {
+				builder.WriteString("<empty>")
+			}
 		} else {
-			builder.WriteString("<empty>")
-		}
-	} else {
-		builder.WriteString("\nBody:\n")
-		builder.WriteString(bodyPlaceholder)
-		if len(info.Body) > 0 {
-			storedBody = bytes.Clone(info.Body)
+			builder.WriteString("\nBody:\n")
+			builder.WriteString(bodyPlaceholder)
+			if len(info.Body) > 0 {
+				storedBody = info.Body
+			}
 		}
 	}
-	builder.WriteString("\n\n")
+	builder.WriteString("\n")
 
 	attempt := &upstreamAttempt{
 		index:       index,
