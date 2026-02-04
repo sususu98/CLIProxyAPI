@@ -42,9 +42,14 @@ type upstreamRequestLog struct {
 	AuthValue string
 }
 
+// bodyPlaceholder is used to defer the decision of showing/hiding request body
+// until we know the final outcome of the request.
+const bodyPlaceholder = "<<UPSTREAM_BODY_PLACEHOLDER>>"
+
 type upstreamAttempt struct {
 	index                int
 	request              string
+	requestBody          []byte // stored when request-log is disabled, for deferred inclusion
 	response             *strings.Builder
 	responseIntroWritten bool
 	statusWritten        bool
@@ -85,6 +90,7 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
 
+	var storedBody []byte
 	if requestLogEnabled {
 		builder.WriteString("\nBody:\n")
 		if len(info.Body) > 0 {
@@ -93,14 +99,19 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 			builder.WriteString("<empty>")
 		}
 	} else {
-		builder.WriteString("\nBody: <omitted for error log>\n")
+		builder.WriteString("\nBody:\n")
+		builder.WriteString(bodyPlaceholder)
+		if len(info.Body) > 0 {
+			storedBody = bytes.Clone(info.Body)
+		}
 	}
 	builder.WriteString("\n\n")
 
 	attempt := &upstreamAttempt{
-		index:    index,
-		request:  builder.String(),
-		response: &strings.Builder{},
+		index:       index,
+		request:     builder.String(),
+		requestBody: storedBody,
+		response:    &strings.Builder{},
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
@@ -256,38 +267,56 @@ func ensureResponseIntro(attempt *upstreamAttempt) {
 }
 
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
-	var builder strings.Builder
-	for _, attempt := range attempts {
-		builder.WriteString(attempt.request)
-	}
-	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+	// No-op: defer log construction to FinalizeInterleavedLog for O(n) instead of O(n²)
 }
 
 func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
+	// No-op: defer log construction to FinalizeInterleavedLog for O(n) instead of O(n²)
+}
+
+// FinalizeInterleavedLog replaces body placeholders based on final request outcome.
+// If hideUpstreamBody is true, placeholders become "<omitted>"; otherwise, actual bodies are shown.
+func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool) {
 	if ginCtx == nil {
 		return
 	}
+	attempts := getAttempts(ginCtx)
+	if len(attempts) == 0 {
+		return
+	}
+
 	var builder strings.Builder
 	for idx, attempt := range attempts {
-		if attempt == nil || attempt.response == nil {
+		if attempt == nil {
 			continue
 		}
-		responseText := attempt.response.String()
-		if responseText == "" {
-			continue
+		requestText := attempt.request
+		if strings.Contains(requestText, bodyPlaceholder) {
+			var replacement string
+			if hideUpstreamBody {
+				replacement = "<omitted>"
+			} else if len(attempt.requestBody) > 0 {
+				replacement = string(attempt.requestBody)
+			} else {
+				replacement = "<empty>"
+			}
+			requestText = strings.Replace(requestText, bodyPlaceholder, replacement, 1)
 		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
+		builder.WriteString(requestText)
+		if attempt.response != nil {
+			responseText := attempt.response.String()
+			if responseText != "" {
+				builder.WriteString(responseText)
+				if !strings.HasSuffix(responseText, "\n") {
+					builder.WriteString("\n")
+				}
+			}
 		}
 		if idx < len(attempts)-1 {
 			builder.WriteString("\n")
 		}
 	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	ginCtx.Set(apiRequestKey, []byte(builder.String()))
 }
 
 func writeHeaders(builder *strings.Builder, headers http.Header) {

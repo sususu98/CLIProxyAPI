@@ -6,12 +6,14 @@ package middleware
 import (
 	"bytes"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -277,10 +279,23 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
-	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+
+	// Check if there's an upstream API call (API_REQUEST set in context)
+	hasUpstreamAPICall := w.extractAPIRequest(c) != nil
+
+	// Check if there were retry attempts (multiple upstream API calls)
+	hasRetryAttempts := w.countUpstreamAttempts(c) > 1
+
+	// Force log when: (1) has API error with upstream call, OR (2) has retry attempts (even if final success)
+	forceLog := w.logOnErrorOnly && ((hasAPIError && hasUpstreamAPICall) || hasRetryAttempts) && !w.logger.IsEnabled()
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
+
+	// Determine if request body should be hidden (success with retries = hide body)
+	hideRequestBody := forceLog && !hasAPIError && hasRetryAttempts
+
+	executor.FinalizeInterleavedLog(c, hideRequestBody)
 
 	if w.isStreaming && w.streamWriter != nil {
 		if w.chunkChannel != nil {
@@ -382,6 +397,19 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 		return w.requestInfo.Body
 	}
 	return nil
+}
+
+func (w *ResponseWriterWrapper) countUpstreamAttempts(c *gin.Context) int {
+	if value, exists := c.Get("API_UPSTREAM_ATTEMPTS"); exists && value != nil {
+		if attempts, ok := value.([]interface{}); ok {
+			return len(attempts)
+		}
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() && rv.Kind() == reflect.Slice {
+			return rv.Len()
+		}
+	}
+	return 0
 }
 
 func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
