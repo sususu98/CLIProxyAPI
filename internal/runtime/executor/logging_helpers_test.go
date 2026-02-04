@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -187,5 +188,77 @@ func TestRecordAPIRequest_IncludesBodyWhenRequestLogEnabled(t *testing.T) {
 	}
 	if strings.Contains(requestText, "<omitted for error log>") {
 		t.Error("should not have omission marker when request-log is enabled")
+	}
+}
+
+func TestFinalizeInterleavedLog_HidesSuccessResponseBody(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+
+	recordAPIRequest(ctx, cfg, upstreamRequestLog{
+		URL:    "https://example.com/api",
+		Method: "POST",
+		Body:   []byte(`{"test": "data"}`),
+	})
+	appendAPIResponseChunk(ctx, cfg, []byte(`{"error": "rate limited"}`))
+
+	recordAPIRequest(ctx, cfg, upstreamRequestLog{
+		URL:    "https://example.com/api",
+		Method: "POST",
+	})
+	appendAPIResponseChunk(ctx, cfg, []byte(`{"success": true, "data": "should be hidden"}`))
+
+	FinalizeInterleavedLog(ginCtx, false, true)
+
+	apiRequest, exists := ginCtx.Get("API_REQUEST")
+	if !exists {
+		t.Fatal("expected API_REQUEST to be set")
+	}
+	result := string(apiRequest.([]byte))
+
+	if !strings.Contains(result, "rate limited") {
+		t.Error("expected first (failed) response body to be present")
+	}
+	if strings.Contains(result, "should be hidden") {
+		t.Error("expected last (success) response body to be hidden")
+	}
+	if !strings.Contains(result, "<omitted>") {
+		t.Error("expected omitted marker in last response")
+	}
+}
+
+func TestFinalizeInterleavedLog_DoesNotHideWhenLastAttemptHasError(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+
+	recordAPIRequest(ctx, cfg, upstreamRequestLog{
+		URL:    "https://example.com/api",
+		Method: "POST",
+	})
+	recordAPIResponseError(ctx, cfg, errors.New("connection refused"))
+
+	FinalizeInterleavedLog(ginCtx, false, true)
+
+	apiRequest, exists := ginCtx.Get("API_REQUEST")
+	if !exists {
+		t.Fatal("expected API_REQUEST to be set")
+	}
+	result := string(apiRequest.([]byte))
+
+	if !strings.Contains(result, "connection refused") {
+		t.Error("expected error message to be present")
+	}
+	if strings.Contains(result, "<omitted>") {
+		t.Error("should not omit response when last attempt has error")
 	}
 }

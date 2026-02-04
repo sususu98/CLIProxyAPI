@@ -294,8 +294,10 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 	// Determine if request body should be hidden (success with retries = hide body)
 	hideRequestBody := forceLog && !hasAPIError && hasRetryAttempts
+	// Hide response body of the last successful attempt when retries occurred but final result is success
+	hideSuccessResponseBody := hideRequestBody
 
-	executor.FinalizeInterleavedLog(c, hideRequestBody)
+	executor.FinalizeInterleavedLog(c, hideRequestBody, hideSuccessResponseBody)
 
 	if w.isStreaming && w.streamWriter != nil {
 		if w.chunkChannel != nil {

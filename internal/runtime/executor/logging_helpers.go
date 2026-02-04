@@ -278,9 +278,7 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	// No-op: defer log construction to FinalizeInterleavedLog for O(n) instead of O(n²)
 }
 
-// FinalizeInterleavedLog replaces body placeholders based on final request outcome.
-// If hideUpstreamBody is true, placeholders become "<omitted>"; otherwise, actual bodies are shown.
-func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool) {
+func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool, hideSuccessResponseBody bool) {
 	if ginCtx == nil {
 		return
 	}
@@ -290,6 +288,7 @@ func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool) {
 	}
 
 	var builder strings.Builder
+	lastIdx := len(attempts) - 1
 	for idx, attempt := range attempts {
 		if attempt == nil {
 			continue
@@ -310,6 +309,9 @@ func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool) {
 		if attempt.response != nil {
 			responseText := attempt.response.String()
 			if responseText != "" {
+				if hideSuccessResponseBody && idx == lastIdx && attempt.bodyHasContent && !attempt.errorWritten {
+					responseText = omitResponseBody(responseText)
+				}
 				builder.WriteString(responseText)
 				if !strings.HasSuffix(responseText, "\n") {
 					builder.WriteString("\n")
@@ -321,6 +323,15 @@ func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool) {
 		}
 	}
 	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+}
+
+func omitResponseBody(responseText string) string {
+	const bodyMarker = "Body:\n"
+	idx := strings.Index(responseText, bodyMarker)
+	if idx == -1 {
+		return responseText
+	}
+	return responseText[:idx+len(bodyMarker)] + "<omitted>\n"
 }
 
 func writeHeaders(builder *strings.Builder, headers http.Header) {
