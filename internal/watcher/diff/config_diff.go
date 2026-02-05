@@ -84,6 +84,19 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}
+	if oldCfg.Routing.SessionAffinity != newCfg.Routing.SessionAffinity {
+		changes = append(changes, fmt.Sprintf("routing.session-affinity: %t -> %t", oldCfg.Routing.SessionAffinity, newCfg.Routing.SessionAffinity))
+	}
+	if strings.TrimSpace(oldCfg.Routing.SessionAffinityTTL) != strings.TrimSpace(newCfg.Routing.SessionAffinityTTL) {
+		changes = append(changes, fmt.Sprintf("routing.session-affinity-ttl: %s -> %s", oldCfg.Routing.SessionAffinityTTL, newCfg.Routing.SessionAffinityTTL))
+	}
+
+	// Antigravity signature cache
+	oldSigCache := oldCfg.AntigravitySignatureCacheEnabled == nil || *oldCfg.AntigravitySignatureCacheEnabled
+	newSigCache := newCfg.AntigravitySignatureCacheEnabled == nil || *newCfg.AntigravitySignatureCacheEnabled
+	if oldSigCache != newSigCache {
+		changes = append(changes, fmt.Sprintf("antigravity-signature-cache-enabled: %t -> %t", oldSigCache, newSigCache))
+	}
 
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
@@ -310,6 +323,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	if payloadChanges := diffPayloadFilterChanges(oldCfg.Payload.Filter, newCfg.Payload.Filter); len(payloadChanges) > 0 {
+		changes = append(changes, payloadChanges...)
+	}
+
 	return changes
 }
 
@@ -395,6 +412,56 @@ func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
 			return false
 		}
 		if !equalStringSet(a[i].APIKeys, b[i].APIKeys) {
+			return false
+		}
+	}
+	return true
+}
+
+func diffPayloadFilterChanges(oldFilters, newFilters []config.PayloadFilterRule) []string {
+	oldCount := countArrayElementFilters(oldFilters)
+	newCount := countArrayElementFilters(newFilters)
+	if oldCount == newCount && equalPayloadFilters(oldFilters, newFilters) {
+		return nil
+	}
+	var changes []string
+	if oldCount != newCount {
+		changes = append(changes, fmt.Sprintf("payload.filter.array-element-filter: %d -> %d entries", oldCount, newCount))
+	} else {
+		changes = append(changes, "payload.filter.array-element-filter: updated")
+	}
+	return changes
+}
+
+func countArrayElementFilters(filters []config.PayloadFilterRule) int {
+	count := 0
+	for _, f := range filters {
+		count += len(f.ArrayElementFilter)
+	}
+	return count
+}
+
+func equalPayloadFilters(a, b []config.PayloadFilterRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !equalArrayElementFilters(a[i].ArrayElementFilter, b[i].ArrayElementFilter) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalArrayElementFilters(a, b []config.ArrayElementFilter) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Path != b[i].Path || a[i].Match.Key != b[i].Match.Key {
+			return false
+		}
+		if !reflect.DeepEqual(a[i].Match.Value, b[i].Match.Value) {
 			return false
 		}
 	}

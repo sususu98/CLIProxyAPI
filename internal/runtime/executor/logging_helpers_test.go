@@ -151,8 +151,9 @@ func TestRecordAPIRequest_OmitsBodyWhenRequestLogDisabled(t *testing.T) {
 	if strings.Contains(requestText, "password123") {
 		t.Error("request body should be omitted when request-log is disabled")
 	}
-	if !strings.Contains(requestText, "<omitted for error log>") {
-		t.Error("expected omission marker in request")
+	// Body is deferred using bodyPlaceholder, which is replaced in FinalizeInterleavedLog
+	if !strings.Contains(requestText, bodyPlaceholder) {
+		t.Error("expected body placeholder in request when request-log is disabled")
 	}
 	if !strings.Contains(requestText, "provider=test-provider") {
 		t.Error("expected provider info to be present")
