@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -159,7 +157,13 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	var lastStatus int
 	var lastBody []byte
+	var noCapacityAttempt int
+	const maxNoCapacityAttempts = 3
 
+	// NOTE: goto modelLoop restarts the for loop from idx=0. This works correctly
+	// when models has only one element (current behavior). If fallback models are
+	// enabled in cliPreviewFallbackOrder, the retry logic should be reconsidered.
+modelLoop:
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		if action == "countTokens" {
@@ -241,6 +245,23 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			continue
 		}
 
+		if geminiShouldRetryNoCapacity(httpResp.StatusCode, data) {
+			if retryAfter := ParseAndClampRetryDelay(data); retryAfter != nil {
+				log.Debugf("gemini cli executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+				return resp, statusErr{code: httpResp.StatusCode, msg: string(data), retryAfter: retryAfter}
+			}
+			if noCapacityAttempt < maxNoCapacityAttempts {
+				delay := DefaultNoCapacityRetryDelay(noCapacityAttempt)
+				log.Debugf("gemini cli executor: no capacity for model %s, retrying in %s (attempt %d/%d)", attemptModel, delay, noCapacityAttempt+1, maxNoCapacityAttempts)
+				if errWait := geminiWait(ctx, delay); errWait != nil {
+					return resp, errWait
+				}
+				noCapacityAttempt++
+				goto modelLoop
+			}
+			log.Debug("gemini cli executor: no capacity, max retry attempts reached")
+		}
+
 		err = newGeminiStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
@@ -307,7 +328,13 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	var lastStatus int
 	var lastBody []byte
+	var noCapacityAttempt int
+	const maxNoCapacityAttempts = 3
 
+	// NOTE: goto modelLoop restarts the for loop from idx=0. This works correctly
+	// when models has only one element (current behavior). If fallback models are
+	// enabled in cliPreviewFallbackOrder, the retry logic should be reconsidered.
+modelLoop:
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		payload = setJSONField(payload, "project", projectID)
@@ -376,6 +403,22 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					log.Debug("gemini cli executor: rate limited, no additional fallback model")
 				}
 				continue
+			}
+			if geminiShouldRetryNoCapacity(httpResp.StatusCode, data) {
+				if retryAfter := ParseAndClampRetryDelay(data); retryAfter != nil {
+					log.Debugf("gemini cli executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+					return nil, statusErr{code: httpResp.StatusCode, msg: string(data), retryAfter: retryAfter}
+				}
+				if noCapacityAttempt < maxNoCapacityAttempts {
+					delay := DefaultNoCapacityRetryDelay(noCapacityAttempt)
+					log.Debugf("gemini cli executor: no capacity for model %s, retrying in %s (attempt %d/%d)", attemptModel, delay, noCapacityAttempt+1, maxNoCapacityAttempts)
+					if errWait := geminiWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					noCapacityAttempt++
+					goto modelLoop
+				}
+				log.Debug("gemini cli executor: no capacity, max retry attempts reached")
 			}
 			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
@@ -482,7 +525,13 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 
 	var lastStatus int
 	var lastBody []byte
+	var noCapacityAttempt int
+	const maxNoCapacityAttempts = 3
 
+	// NOTE: goto modelLoop restarts the for loop from idx=0. This works correctly
+	// when models has only one element (current behavior). If fallback models are
+	// enabled in cliPreviewFallbackOrder, the retry logic should be reconsidered.
+modelLoop:
 	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
 	// Gemini CLI endpoint when iterating fallback variants.
 	for range models {
@@ -552,6 +601,22 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		if resp.StatusCode == 429 {
 			log.Debugf("gemini cli executor: rate limited, retrying with next model")
 			continue
+		}
+		if geminiShouldRetryNoCapacity(resp.StatusCode, data) {
+			if retryAfter := ParseAndClampRetryDelay(data); retryAfter != nil {
+				log.Debugf("gemini cli executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+				return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(data), retryAfter: retryAfter}
+			}
+			if noCapacityAttempt < maxNoCapacityAttempts {
+				delay := DefaultNoCapacityRetryDelay(noCapacityAttempt)
+				log.Debugf("gemini cli executor: no capacity, retrying in %s (attempt %d/%d)", delay, noCapacityAttempt+1, maxNoCapacityAttempts)
+				if errWait := geminiWait(ctx, delay); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
+				noCapacityAttempt++
+				goto modelLoop
+			}
+			log.Debug("gemini cli executor: no capacity, max retry attempts reached")
 		}
 		break
 	}
@@ -853,55 +918,31 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 
-// parseRetryDelay extracts the retry delay from a Google API 429 error response.
-// The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
-// Returns the parsed duration or an error if it cannot be determined.
-func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
-	// Try to parse the retryDelay from the error response
-	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
-	details := gjson.GetBytes(errorBody, "error.details")
-	if details.Exists() && details.IsArray() {
-		for _, detail := range details.Array() {
-			typeVal := detail.Get("@type").String()
-			if typeVal == "type.googleapis.com/google.rpc.RetryInfo" {
-				retryDelay := detail.Get("retryDelay").String()
-				if retryDelay != "" {
-					// Parse duration string like "0.847655010s"
-					duration, err := time.ParseDuration(retryDelay)
-					if err != nil {
-						return nil, fmt.Errorf("failed to parse duration")
-					}
-					return &duration, nil
-				}
-			}
-		}
+// parseRetryDelay is now defined in retry_helpers.go and shared across executors.
 
-		// Fallback: try ErrorInfo.metadata.quotaResetDelay (e.g., "373.801628ms")
-		for _, detail := range details.Array() {
-			typeVal := detail.Get("@type").String()
-			if typeVal == "type.googleapis.com/google.rpc.ErrorInfo" {
-				quotaResetDelay := detail.Get("metadata.quotaResetDelay").String()
-				if quotaResetDelay != "" {
-					duration, err := time.ParseDuration(quotaResetDelay)
-					if err == nil {
-						return &duration, nil
-					}
-				}
-			}
-		}
+// geminiShouldRetryNoCapacity checks if the error indicates a transient no-capacity condition.
+func geminiShouldRetryNoCapacity(statusCode int, body []byte) bool {
+	if statusCode != http.StatusServiceUnavailable {
+		return false
 	}
-
-	// Fallback: parse from error.message "Your quota will reset after Xs."
-	message := gjson.GetBytes(errorBody, "error.message").String()
-	if message != "" {
-		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
-		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
-			seconds, err := strconv.Atoi(matches[1])
-			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
-			}
-		}
+	if len(body) == 0 {
+		return false
 	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "no capacity available") || strings.Contains(msg, "model_capacity_exhausted")
+}
 
-	return nil, fmt.Errorf("no RetryInfo found")
+// geminiWait waits for the specified duration or until context is cancelled.
+func geminiWait(ctx context.Context, wait time.Duration) error {
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

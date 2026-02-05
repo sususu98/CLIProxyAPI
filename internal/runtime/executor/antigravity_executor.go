@@ -288,17 +288,27 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+						log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
+						return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
+					if retryAfter := ParseAndClampRetryDelay(bodyBytes); retryAfter != nil {
+						log.Debugf("antigravity executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+						return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+					}
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 						continue
 					}
 					if attempt+1 < attempts {
-						delay := antigravityNoCapacityRetryDelay(attempt)
+						delay := DefaultNoCapacityRetryDelay(attempt)
 						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
@@ -307,11 +317,6 @@ attemptLoop:
 					}
 				}
 				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-				if httpResp.StatusCode == http.StatusTooManyRequests {
-					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-						sErr.retryAfter = retryAfter
-					}
-				}
 				err = sErr
 				return resp, err
 			}
@@ -442,17 +447,27 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+						log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
+						return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
+					if retryAfter := ParseAndClampRetryDelay(bodyBytes); retryAfter != nil {
+						log.Debugf("antigravity executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+						return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+					}
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 						continue
 					}
 					if attempt+1 < attempts {
-						delay := antigravityNoCapacityRetryDelay(attempt)
+						delay := DefaultNoCapacityRetryDelay(attempt)
 						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
@@ -461,11 +476,6 @@ attemptLoop:
 					}
 				}
 				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-				if httpResp.StatusCode == http.StatusTooManyRequests {
-					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-						sErr.retryAfter = retryAfter
-					}
-				}
 				err = sErr
 				return resp, err
 			}
@@ -840,17 +850,27 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+						log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
+						return nil, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
+					if retryAfter := ParseAndClampRetryDelay(bodyBytes); retryAfter != nil {
+						log.Debugf("antigravity executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+						return nil, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+					}
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 						continue
 					}
 					if attempt+1 < attempts {
-						delay := antigravityNoCapacityRetryDelay(attempt)
+						delay := DefaultNoCapacityRetryDelay(attempt)
 						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return nil, errWait
@@ -859,11 +879,6 @@ attemptLoop:
 					}
 				}
 				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-				if httpResp.StatusCode == http.StatusTooManyRequests {
-					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-						sErr.retryAfter = retryAfter
-					}
-				}
 				err = sErr
 				return nil, err
 			}
@@ -1067,16 +1082,17 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), bodyBytes...)
 		lastErr = nil
-		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-			continue
-		}
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
+				log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
+				return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
+			}
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
 			}
 		}
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 		return cliproxyexecutor.Response{}, sErr
 	}
 
@@ -1618,17 +1634,6 @@ func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
 	}
 	msg := strings.ToLower(string(body))
 	return strings.Contains(msg, "no capacity available")
-}
-
-func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
-	if attempt < 0 {
-		attempt = 0
-	}
-	delay := time.Duration(attempt+1) * 250 * time.Millisecond
-	if delay > 2*time.Second {
-		delay = 2 * time.Second
-	}
-	return delay
 }
 
 func antigravityWait(ctx context.Context, wait time.Duration) error {
