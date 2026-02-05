@@ -280,13 +280,10 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
 
-	// Check if there's an upstream API call (API_REQUEST set in context)
-	hasUpstreamAPICall := w.extractAPIRequest(c) != nil
+	upstreamAttemptCount := w.countUpstreamAttempts(c)
+	hasUpstreamAPICall := upstreamAttemptCount > 0
+	hasRetryAttempts := upstreamAttemptCount > 1
 
-	// Check if there were retry attempts (multiple upstream API calls)
-	hasRetryAttempts := w.countUpstreamAttempts(c) > 1
-
-	// Force log when: (1) has API error with upstream call, OR (2) has retry attempts (even if final success)
 	forceLog := w.logOnErrorOnly && ((hasAPIError && hasUpstreamAPICall) || hasRetryAttempts) && !w.logger.IsEnabled()
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
