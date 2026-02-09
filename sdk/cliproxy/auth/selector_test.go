@@ -1405,6 +1405,43 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_RoundRobinDistribution(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	sessionCount := 12
+	counts := make(map[string]int)
+	for i := 0; i < sessionCount; i++ {
+		payload := []byte(fmt.Sprintf(`{"metadata":{"user_id":"user_xxx_account__session_%08d-0000-0000-0000-000000000000"}}`, i))
+		opts := cliproxyexecutor.Options{OriginalRequest: payload}
+		got, err := selector.Pick(context.Background(), "provider", "model", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick() session %d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+
+	expected := sessionCount / len(auths)
+	for _, auth := range auths {
+		got := counts[auth.ID]
+		if got != expected {
+			t.Errorf("auth %s got %d sessions, want %d (round-robin should distribute evenly)", auth.ID, got, expected)
+		}
+	}
+}
+
 func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	t.Parallel()
 

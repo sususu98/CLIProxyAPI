@@ -512,8 +512,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
-		// Cached auth not available, select new one
-		auth := s.selectByHash(cacheKey, available)
+		// Cached auth not available, reselect via fallback selector for even distribution
+		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+		if err != nil {
+			return nil, err
+		}
 		s.cache.Set(cacheKey, auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
@@ -532,7 +535,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth := s.selectByHash(cacheKey, available)
+	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+	if err != nil {
+		return nil, err
+	}
 	s.cache.Set(cacheKey, auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
@@ -554,14 +560,6 @@ func truncateSessionID(id string) string {
 		return id
 	}
 	return id[:8] + "..."
-}
-
-// selectByHash uses consistent hashing to pick an auth from available list.
-func (s *SessionAffinitySelector) selectByHash(sessionID string, available []*Auth) *Auth {
-	h := fnv.New32a()
-	h.Write([]byte(sessionID))
-	idx := int(h.Sum32()) % len(available)
-	return available[idx]
 }
 
 // Stop releases resources held by the selector.
