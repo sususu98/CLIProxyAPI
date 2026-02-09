@@ -40,6 +40,30 @@ func ConvertLevelToBudget(level string) (int, bool) {
 	return budget, ok
 }
 
+// AdaptiveEffortToBudget maps Anthropic adaptive thinking effort levels to thinkingBudget values.
+//
+// Mapping:
+//
+//	low    → 4096
+//	medium → 16384
+//	high   → 32768
+//	max    → 63998  (maxOutputTokens=64000, budget must be < maxOutputTokens)
+//	<unset>→ 32768
+func AdaptiveEffortToBudget(effort string) int {
+	switch strings.ToLower(effort) {
+	case "low":
+		return 4096
+	case "medium":
+		return 16384
+	case "high":
+		return 32768
+	case "max":
+		return 63998
+	default:
+		return 32768
+	}
+}
+
 // BudgetThreshold constants define the upper bounds for each thinking level.
 // These are used by ConvertBudgetToLevel for range-based mapping.
 const (

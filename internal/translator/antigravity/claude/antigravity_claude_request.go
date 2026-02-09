@@ -453,9 +453,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
-	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
+	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts
 	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
-		switch t.Get("type").String() {
+		thinkingType := t.Get("type").String()
+		switch thinkingType {
 		case "enabled":
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
@@ -469,9 +470,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", 64000)
 			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 		case "adaptive":
-			// Keep adaptive as a high level sentinel; ApplyThinking resolves it
-			// to model-specific max capability.
-			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
+			var budget int
+			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+				budget = int(b.Int())
+			} else {
+				effort := gjson.GetBytes(rawJSON, "output_config.effort").String()
+				budget = thinking.AdaptiveEffortToBudget(effort)
+			}
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 		}
 	}

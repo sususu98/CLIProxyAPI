@@ -119,3 +119,30 @@ func TestStripThinkingBlocksFromResponse(t *testing.T) {
 		t.Fatalf("expected text block to remain, got: %s", string(result))
 	}
 }
+
+func TestThinkingEnabledFromClaude_AdaptiveType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		payload string
+		enabled bool
+		ok      bool
+	}{
+		{"enabled", `{"thinking":{"type":"enabled","budget_tokens":8000}}`, true, true},
+		{"adaptive", `{"thinking":{"type":"adaptive"}}`, true, true},
+		{"disabled", `{"thinking":{"type":"disabled"}}`, false, true},
+		{"no_thinking", `{}`, false, false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			enabled, ok := thinkingEnabledFromClaude([]byte(tt.payload))
+			if enabled != tt.enabled || ok != tt.ok {
+				t.Errorf("thinkingEnabledFromClaude(%s) = (%v, %v), want (%v, %v)", tt.name, enabled, ok, tt.enabled, tt.ok)
+			}
+		})
+	}
+}
