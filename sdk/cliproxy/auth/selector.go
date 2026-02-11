@@ -128,10 +128,10 @@ func authPriority(auth *Auth) int {
 		}
 	}
 
-	// Give priority boost for antigravity "ultra" tier OAuth files.
+	// Give priority boost for "ultra" tier OAuth files.
 	// Ultra accounts form a separate priority group; standard accounts
 	// are only used when all ultra accounts are unavailable.
-	if auth.Provider == "antigravity" && strings.Contains(strings.ToLower(auth.ID), "ultra") {
+	if (auth.Provider == "antigravity" || auth.Provider == "gemini-cli") && strings.Contains(strings.ToLower(auth.ID), "ultra") {
 		parsed += 100
 	}
 
