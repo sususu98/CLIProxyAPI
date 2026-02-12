@@ -289,10 +289,18 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	// Determine if request body should be hidden (success with retries = hide body)
-	hideRequestBody := forceLog && !hasAPIError && hasRetryAttempts
-	// Hide response body of the last successful attempt when retries occurred but final result is success
-	hideSuccessResponseBody := hideRequestBody
+	// Determine body visibility based on final status when force-logging (request-log disabled):
+	//   - Success (200) or resource errors (429/503): hide bodies, only log timestamps and statuses
+	//   - Client/server errors (400, 500, etc.): show full bodies for debugging
+	// When request-log is enabled: always show bodies (user explicitly wants detailed logs).
+	var hideRequestBody, hideSuccessResponseBody bool
+	if forceLog {
+		isResourceError := finalStatusCode == http.StatusTooManyRequests || finalStatusCode == http.StatusServiceUnavailable
+		if !hasAPIError || isResourceError {
+			hideRequestBody = true
+			hideSuccessResponseBody = true
+		}
+	}
 
 	executor.FinalizeInterleavedLog(c, hideRequestBody, hideSuccessResponseBody)
 
