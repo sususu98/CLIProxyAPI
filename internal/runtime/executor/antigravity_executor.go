@@ -45,13 +45,15 @@ const (
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
+	defaultAntigravityAgent        = "antigravity/1.16.5 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 
 	// webSearchGeminiModel is the Gemini model used for web search functionality
 	webSearchGeminiModel = "gemini-2.5-flash"
+
+	antigravitySetUserSettingsPath = "/v1internal:setUserSettings"
 )
 
 var (
@@ -1335,6 +1337,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
 	}
+	e.applyUserSettings(ctx, auth, tokenResp.AccessToken)
 	return auth, nil
 }
 
@@ -1369,6 +1372,47 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 	auth.Metadata["project_id"] = strings.TrimSpace(projectID)
 
 	return nil
+}
+
+func (e *AntigravityExecutor) applyUserSettings(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
+	token := strings.TrimSpace(accessToken)
+	if token == "" {
+		return
+	}
+
+	settingsURL := buildBaseURL(auth) + antigravitySetUserSettingsPath
+	body := `{"user_settings":{"telemetry_enabled":false,"user_data_collection_force_disabled":true,"marketing_emails_enabled":false}}`
+
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, settingsURL, strings.NewReader(body))
+	if errReq != nil {
+		log.Warnf("antigravity executor: build setUserSettings request failed: %v", errReq)
+		return
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0")
+	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	req.Header.Set("Connection", "keep-alive")
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 5*time.Second)
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.Warnf("antigravity executor: setUserSettings request failed: %v", errDo)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		log.Warnf("antigravity executor: setUserSettings returned HTTP %d", resp.StatusCode)
+		return
+	}
+	label := metaStringValue(auth.Metadata, "email")
+	if label == "" {
+		label = auth.Label
+	}
+	log.Infof("antigravity executor: setUserSettings applied for %s", label)
 }
 
 func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {

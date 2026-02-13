@@ -432,6 +432,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		_, _ = h.authManager.Update(ctx, auth)
 	}
 
+	applyAntigravityUserSettings(ctx, auth, strings.TrimSpace(tokenResp.AccessToken), h.apiCallTransport(auth))
+
 	return strings.TrimSpace(tokenResp.AccessToken), nil
 }
 
@@ -454,6 +456,59 @@ func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
 		return !exp.After(time.Now().Add(skew))
 	}
 	return true
+}
+
+func applyAntigravityUserSettings(ctx context.Context, auth *coreauth.Auth, accessToken string, transport http.RoundTripper) {
+	if strings.TrimSpace(accessToken) == "" {
+		return
+	}
+
+	baseURL := "https://daily-cloudcode-pa.googleapis.com"
+	if auth != nil && auth.Metadata != nil {
+		if v, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(v) != "" {
+			baseURL = strings.TrimSuffix(strings.TrimSpace(v), "/")
+		}
+	}
+
+	settingsURL := baseURL + "/v1internal:setUserSettings"
+	body := `{"user_settings":{"telemetry_enabled":false,"user_data_collection_force_disabled":true,"marketing_emails_enabled":false}}`
+
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, settingsURL, strings.NewReader(body))
+	if errReq != nil {
+		log.Warnf("antigravity management: build setUserSettings request failed: %v", errReq)
+		return
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0")
+	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	req.Header.Set("Connection", "keep-alive")
+
+	httpClient := &http.Client{Timeout: defaultAPICallTimeout, Transport: transport}
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.Warnf("antigravity management: setUserSettings request failed: %v", errDo)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		log.Warnf("antigravity management: setUserSettings returned HTTP %d", resp.StatusCode)
+		return
+	}
+
+	label := ""
+	if auth != nil && auth.Metadata != nil {
+		if email, ok := auth.Metadata["email"].(string); ok {
+			label = email
+		}
+	}
+	if label == "" && auth != nil {
+		label = auth.Label
+	}
+	log.Infof("antigravity management: setUserSettings applied for %s", label)
 }
 
 func int64Value(raw any) int64 {
