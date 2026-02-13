@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -712,6 +714,315 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	clone := transport.Clone()
 	clone.Proxy = nil
 	return clone
+}
+
+// authCheckRequest is the request body for POST /v0/management/auth-check.
+type authCheckRequest struct {
+	AuthIndexSnake  *string `json:"auth_index"`
+	AuthIndexCamel  *string `json:"authIndex"`
+	AuthIndexPascal *string `json:"AuthIndex"`
+}
+
+// authCheckResponse is the response for POST /v0/management/auth-check.
+type authCheckResponse struct {
+	Status         string `json:"status"`
+	StatusCode     int    `json:"status_code"`
+	Message        string `json:"message,omitempty"`
+	AuthIndex      string `json:"auth_index,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Label          string `json:"label,omitempty"`
+	Email          string `json:"email,omitempty"`
+	ValidationURL  string `json:"validation_url,omitempty"`
+	UpstreamBody   string `json:"upstream_body,omitempty"`
+	TokenRefreshed bool   `json:"token_refreshed"`
+}
+
+// AuthCheck performs a health check on a specific OAuth account by sending a fully
+// disguised streamGenerateContent request to the upstream API, mimicking real
+// Antigravity client behavior.
+//
+// Endpoint:
+//
+//	POST /v0/management/auth-check
+//
+// Authentication:
+//
+//	Same as other management APIs (requires a management key and remote-management rules).
+//
+// Request JSON:
+//   - auth_index / authIndex / AuthIndex (required):
+//     The credential "auth_index" from GET /v0/management/auth-files.
+//
+// Response JSON:
+//   - status: "ok" | "validation_required" | "token_error" | "rate_limited" | "forbidden" | "no_capacity" | "unavailable" | "error"
+//   - status_code: Upstream HTTP status code (0 if request failed before reaching upstream).
+//   - message: Human-readable status description.
+//   - auth_index: The auth index that was checked.
+//   - provider: The auth provider (e.g., "antigravity").
+//   - label: The auth label.
+//   - email: The auth email if available.
+//   - validation_url: The Google account verification URL if status is "validation_required".
+//   - upstream_body: Raw upstream response body (truncated for large responses).
+//   - token_refreshed: Whether the access token was refreshed during the check.
+//
+// Example:
+//
+//	curl -sS -X POST "http://127.0.0.1:8317/v0/management/auth-check" \
+//	  -H "Authorization: Bearer <MANAGEMENT_KEY>" \
+//	  -H "Content-Type: application/json" \
+//	  -d '{"auth_index":"<AUTH_INDEX>"}'
+func (h *Handler) AuthCheck(c *gin.Context) {
+	var body authCheckRequest
+	if errBind := c.ShouldBindJSON(&body); errBind != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
+	if authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
+		return
+	}
+
+	auth := h.authByIndex(authIndex)
+	if auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found", "auth_index": authIndex})
+		return
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider != "antigravity" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth-check currently only supports antigravity provider", "provider": provider})
+		return
+	}
+
+	result := h.performAntigravityAuthCheck(c.Request.Context(), auth, authIndex)
+	c.JSON(http.StatusOK, result)
+}
+
+// performAntigravityAuthCheck refreshes the token and sends a minimal disguised
+// streamGenerateContent request to verify account health.
+func (h *Handler) performAntigravityAuthCheck(ctx context.Context, auth *coreauth.Auth, authIndex string) authCheckResponse {
+	resp := authCheckResponse{
+		AuthIndex: authIndex,
+		Provider:  strings.TrimSpace(auth.Provider),
+		Label:     auth.Label,
+	}
+	if auth.Metadata != nil {
+		if email, ok := auth.Metadata["email"].(string); ok {
+			resp.Email = email
+		}
+	}
+
+	tokenBefore := strings.TrimSpace(tokenValueFromMetadata(auth.Metadata))
+	token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
+	if errToken != nil {
+		resp.Status = "token_error"
+		resp.Message = fmt.Sprintf("token refresh failed: %v", errToken)
+		return resp
+	}
+	if strings.TrimSpace(token) == "" {
+		resp.Status = "token_error"
+		resp.Message = "token refresh returned empty access_token"
+		return resp
+	}
+	resp.TokenRefreshed = token != tokenBefore
+
+	baseURLs := authCheckBaseURLs(auth)
+
+	userAgent := "antigravity/1.16.5 darwin/arm64"
+	if auth.Attributes != nil {
+		if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+			userAgent = ua
+		}
+	}
+	if auth.Metadata != nil {
+		if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
+			userAgent = strings.TrimSpace(ua)
+		}
+	}
+
+	projectID := ""
+	if auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+
+	payload, errPayload := buildAuthCheckPayload(projectID)
+	if errPayload != nil {
+		resp.Status = "error"
+		resp.Message = fmt.Sprintf("failed to build payload: %v", errPayload)
+		return resp
+	}
+
+	httpClient := &http.Client{
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth),
+	}
+
+	for _, baseURL := range baseURLs {
+		requestURL := baseURL + "/v1internal:streamGenerateContent?alt=sse"
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(string(payload)))
+		if errReq != nil {
+			resp.Status = "error"
+			resp.Message = fmt.Sprintf("failed to build request: %v", errReq)
+			return resp
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", userAgent)
+		httpReq.Header.Set("Accept", "text/event-stream")
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			resp.Status = "error"
+			resp.Message = fmt.Sprintf("request failed: %v", errDo)
+			continue
+		}
+
+		bodyReader := io.LimitReader(httpResp.Body, 8192)
+		bodyBytes, errRead := io.ReadAll(bodyReader)
+		_ = httpResp.Body.Close()
+		if errRead != nil {
+			resp.Status = "error"
+			resp.StatusCode = httpResp.StatusCode
+			resp.Message = fmt.Sprintf("failed to read response: %v", errRead)
+			return resp
+		}
+
+		resp.StatusCode = httpResp.StatusCode
+		resp.Status, resp.Message, resp.ValidationURL = classifyAuthCheckResult(httpResp.StatusCode, bodyBytes)
+		if resp.Status != "ok" {
+			resp.UpstreamBody = string(bodyBytes)
+		}
+		return resp
+	}
+
+	return resp
+}
+
+func authCheckBaseURLs(auth *coreauth.Auth) []string {
+	if auth != nil {
+		if auth.Attributes != nil {
+			if v := strings.TrimSpace(auth.Attributes["base_url"]); v != "" {
+				return []string{strings.TrimSuffix(v, "/")}
+			}
+		}
+		if auth.Metadata != nil {
+			if v, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(v) != "" {
+				return []string{strings.TrimSuffix(strings.TrimSpace(v), "/")}
+			}
+		}
+	}
+	return []string{
+		"https://daily-cloudcode-pa.googleapis.com",
+		"https://daily-cloudcode-pa.sandbox.googleapis.com",
+	}
+}
+
+func buildAuthCheckPayload(projectID string) ([]byte, error) {
+	if projectID == "" {
+		projectID = "probe-" + uuid.NewString()[:8]
+	}
+
+	type part struct {
+		Text string `json:"text"`
+	}
+	type content struct {
+		Role  string `json:"role"`
+		Parts []part `json:"parts"`
+	}
+	type genConfig struct {
+		Temperature    float64 `json:"temperature"`
+		CandidateCount int     `json:"candidateCount"`
+	}
+	type request struct {
+		Contents          []content `json:"contents"`
+		SystemInstruction content   `json:"systemInstruction"`
+		GenerationConfig  genConfig `json:"generationConfig"`
+		SessionID         string    `json:"sessionId"`
+	}
+	type envelope struct {
+		Model       string  `json:"model"`
+		UserAgent   string  `json:"userAgent"`
+		RequestType string  `json:"requestType"`
+		Project     string  `json:"project"`
+		RequestID   string  `json:"requestId"`
+		Request     request `json:"request"`
+	}
+
+	payload := envelope{
+		Model:       "gemini-3-flash",
+		UserAgent:   "antigravity",
+		RequestType: "agent",
+		Project:     projectID,
+		RequestID:   "agent-" + uuid.NewString(),
+		Request: request{
+			Contents: []content{
+				{Role: "user", Parts: []part{{Text: "hi"}}},
+			},
+			SystemInstruction: content{
+				Role:  "user",
+				Parts: []part{{Text: "Reply with only the word OK."}},
+			},
+			GenerationConfig: genConfig{
+				Temperature:    0,
+				CandidateCount: 1,
+			},
+			SessionID: "-1234567890",
+		},
+	}
+
+	return json.Marshal(payload)
+}
+
+// classifyAuthCheckResult determines the auth status from the upstream response.
+func classifyAuthCheckResult(statusCode int, body []byte) (status, message, validationURL string) {
+	bodyStr := string(body)
+
+	if statusCode >= 200 && statusCode < 300 {
+		return "ok", "account is healthy", ""
+	}
+
+	if statusCode == 403 {
+		if strings.Contains(bodyStr, "VALIDATION_REQUIRED") {
+			valURL := gjson.GetBytes(body, "error.details.#(metadata.validation_url).metadata.validation_url").String()
+			return "validation_required", "account requires Google verification", valURL
+		}
+		return "forbidden", fmt.Sprintf("upstream returned 403: %s", summarizeBody(bodyStr)), ""
+	}
+
+	if statusCode == 401 {
+		return "token_error", "upstream rejected token (401 Unauthorized)", ""
+	}
+
+	if statusCode == 429 {
+		return "rate_limited", "account is rate limited (429)", ""
+	}
+
+	if statusCode == 503 {
+		if strings.Contains(strings.ToLower(bodyStr), "no capacity") {
+			return "no_capacity", "no capacity available (503)", ""
+		}
+		return "unavailable", fmt.Sprintf("service unavailable (503): %s", summarizeBody(bodyStr)), ""
+	}
+
+	if statusCode >= 500 {
+		return "unavailable", fmt.Sprintf("upstream error (%d): %s", statusCode, summarizeBody(bodyStr)), ""
+	}
+
+	return "error", fmt.Sprintf("upstream returned HTTP %d: %s", statusCode, summarizeBody(bodyStr)), ""
+}
+
+// summarizeBody returns a truncated version of the body for error messages.
+func summarizeBody(body string) string {
+	body = strings.TrimSpace(body)
+	if len(body) > 200 {
+		return body[:200] + "..."
+	}
+	return body
 }
 
 func buildProxyTransport(proxyStr string) *http.Transport {
