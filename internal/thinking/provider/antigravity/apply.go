@@ -187,6 +187,7 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 // normalizeClaudeBudget applies Claude-specific constraints to thinking budget.
 //
 // It handles:
+//   - Clamping maxOutputTokens to model's MaxCompletionTokens
 //   - Ensuring thinking budget < max_tokens
 //   - Removing thinkingConfig if budget < minimum allowed
 //
@@ -195,6 +196,13 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 func (a *Applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *registry.ModelInfo) (int, []byte) {
 	if modelInfo == nil {
 		return budget, payload
+	}
+
+	// Upstream API returns 400 INVALID_ARGUMENT when maxOutputTokens exceeds model limit.
+	if modelInfo.MaxCompletionTokens > 0 {
+		if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && int(maxTok.Int()) > modelInfo.MaxCompletionTokens {
+			payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+		}
 	}
 
 	// Get effective max tokens

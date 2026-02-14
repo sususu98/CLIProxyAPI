@@ -1512,6 +1512,13 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	if strings.Contains(modelName, "claude") {
 		payloadStr, _ = sjson.Set(payloadStr, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+		// Clamp maxOutputTokens to model's MaxCompletionTokens to prevent 400 INVALID_ARGUMENT.
+		// This runs unconditionally, unlike normalizeClaudeBudget which only runs with thinking config.
+		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+			if maxTok := gjson.Get(payloadStr, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && int(maxTok.Int()) > modelInfo.MaxCompletionTokens {
+				payloadStr, _ = sjson.Set(payloadStr, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+			}
+		}
 	} else {
 		payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
 	}
