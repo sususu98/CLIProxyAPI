@@ -764,7 +764,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
 	if isClaude && doWebSearchTool(req.Payload) {
 		log.Debugf("antigravity executor: web_search tool detected, using Gemini for stream: %s", req.Model)
-		return e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
+		chunks, wsErr := e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
+		if wsErr != nil {
+			return nil, wsErr
+		}
+		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)

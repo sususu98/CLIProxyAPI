@@ -1026,7 +1026,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 	}
 }
 
-func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	if provider == "" {
 		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
@@ -1057,7 +1057,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
-		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
+		streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			rerr := &Error{Message: errStream.Error()}
 			var se cliproxyexecutor.StatusError
@@ -1103,8 +1103,11 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks, stripThinking, rewriteModel)
-		return out, nil
+		}(execCtx, auth.Clone(), provider, streamResult.Chunks, stripThinking, rewriteModel)
+		return &cliproxyexecutor.StreamResult{
+			Headers: streamResult.Headers,
+			Chunks:  out,
+		}, nil
 	}
 }
 
