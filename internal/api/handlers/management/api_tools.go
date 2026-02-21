@@ -830,7 +830,7 @@ func (h *Handler) performAntigravityAuthCheck(ctx context.Context, auth *coreaut
 
 	baseURLs := authCheckBaseURLs(auth)
 
-	userAgent := "antigravity/1.16.5 darwin/arm64"
+	userAgent := "antigravity/1.18.3 darwin/arm64"
 	if auth.Attributes != nil {
 		if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
 			userAgent = ua
