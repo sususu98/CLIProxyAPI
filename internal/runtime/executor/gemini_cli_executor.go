@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -945,4 +946,107 @@ func geminiWait(ctx context.Context, wait time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// FetchGeminiCLIModels retrieves available models for gemini-cli using the
+// retrieveUserQuota endpoint. Returns nil on any failure so the caller can
+// fall back to the static model list.
+func FetchGeminiCLIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	// 1. Obtain OAuth token
+	tokenSource, _, errToken := prepareGeminiCLITokenSource(ctx, cfg, auth)
+	if errToken != nil {
+		log.WithError(errToken).Debug("gemini-cli executor: token source error for model discovery")
+		return nil
+	}
+	tok, errTok := tokenSource.Token()
+	if errTok != nil || tok.AccessToken == "" {
+		log.WithError(errTok).Debug("gemini-cli executor: failed to obtain token for model discovery")
+		return nil
+	}
+
+	// 2. Resolve project ID
+	projectID := resolveGeminiProjectID(auth)
+	if projectID == "" {
+		log.Debug("gemini-cli executor: empty project ID, skipping model discovery")
+		return nil
+	}
+
+	// 3. Build request
+	quotaURL := fmt.Sprintf("%s/%s:retrieveUserQuota", codeAssistEndpoint, codeAssistVersion)
+	reqBody, _ := json.Marshal(map[string]string{"project": projectID})
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, quotaURL, bytes.NewReader(reqBody))
+	if errReq != nil {
+		return nil
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	applyGeminiCLIHeaders(httpReq)
+
+	// 4. Execute
+	httpClient := newHTTPClient(ctx, cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		log.WithError(errDo).Debug("gemini-cli executor: model discovery request failed")
+		return nil
+	}
+	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	if errClose := httpResp.Body.Close(); errClose != nil {
+		log.Errorf("gemini-cli executor: close response body error: %v", errClose)
+	}
+	if errRead != nil {
+		return nil
+	}
+	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		log.Debugf("gemini-cli executor: model discovery returned status %d", httpResp.StatusCode)
+		return nil
+	}
+
+	// 5. Parse buckets and extract unique model IDs
+	bucketsResult := gjson.GetBytes(bodyBytes, "buckets")
+	if !bucketsResult.Exists() {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var modelIDs []string
+	for _, bucket := range bucketsResult.Array() {
+		if bucket.Get("tokenType").String() != "REQUESTS" {
+			continue
+		}
+		modelID := strings.TrimSpace(bucket.Get("modelId").String())
+		if modelID == "" || strings.HasSuffix(modelID, "_vertex") {
+			continue
+		}
+		if _, dup := seen[modelID]; !dup {
+			seen[modelID] = struct{}{}
+			modelIDs = append(modelIDs, modelID)
+		}
+	}
+
+	if len(modelIDs) == 0 {
+		return nil
+	}
+
+	// 6. Build ModelInfo slice with thinking config from static lookup
+	now := time.Now().Unix()
+	modelConfig := registry.GetGeminiCLIModelConfig()
+	models := make([]*registry.ModelInfo, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		modelInfo := &registry.ModelInfo{
+			ID:          modelID,
+			Name:        "models/" + modelID,
+			Description: modelID,
+			DisplayName: modelID,
+			Version:     modelID,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "google",
+			Type:        "gemini",
+		}
+		if modelCfg := modelConfig[modelID]; modelCfg != nil && modelCfg.Thinking != nil {
+			modelInfo.Thinking = modelCfg.Thinking
+		}
+		models = append(models, modelInfo)
+	}
+	return models
 }

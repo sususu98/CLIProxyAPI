@@ -962,6 +962,28 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 	}
 }
 
+// GeminiCLIModelConfig captures static gemini-cli model overrides, including
+// Thinking budget limits. Used by FetchGeminiCLIModels to enrich dynamically
+// discovered models with thinking support metadata.
+type GeminiCLIModelConfig struct {
+	Thinking *ThinkingSupport
+}
+
+// GetGeminiCLIModelConfig returns static configuration for gemini-cli models.
+// Keys use upstream model IDs returned by the retrieveUserQuota endpoint.
+// This map is used to enrich dynamically discovered models with thinking
+// support metadata that the quota API does not provide.
+func GetGeminiCLIModelConfig() map[string]*GeminiCLIModelConfig {
+	return map[string]*GeminiCLIModelConfig{
+		"gemini-2.5-pro":         {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true}},
+		"gemini-2.5-flash":       {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}},
+		"gemini-2.5-flash-lite":  {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}},
+		"gemini-3-pro-preview":   {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
+		"gemini-3-flash-preview": {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}},
+		"gemini-3.1-pro-preview": {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
+	}
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions
 func GetKimiModels() []*ModelInfo {
 	return []*ModelInfo{

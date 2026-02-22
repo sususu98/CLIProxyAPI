@@ -795,7 +795,12 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
-		models = registry.GetGeminiCLIModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		models = executor.FetchGeminiCLIModels(ctx, a, s.cfg)
+		cancel()
+		if len(models) == 0 {
+			models = registry.GetGeminiCLIModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()

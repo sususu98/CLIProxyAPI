@@ -104,6 +104,13 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 			MaxCompletionTokens: cfg.MaxCompletionTokens,
 		}
 	}
+	// Check Gemini-CLI static config
+	if cfg := GetGeminiCLIModelConfig()[modelID]; cfg != nil {
+		return &ModelInfo{
+			ID:       modelID,
+			Thinking: cfg.Thinking,
+		}
+	}
 
 	return nil
 }
