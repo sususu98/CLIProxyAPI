@@ -1732,20 +1732,47 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
+// resolveRequestType maps a model name to the Antigravity requestType.
+// Mapping derived from real Antigravity client traffic analysis.
+func resolveRequestType(modelName string) string {
+	agentModels := []string{
+		"gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3-flash",
+		"claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
+	}
+	for _, m := range agentModels {
+		if modelName == m {
+			return "agent"
+		}
+	}
+	if modelName == "gemini-3-pro-image" {
+		return "image_gen"
+	}
+	if modelName == "gemini-2.5-flash-lite" || modelName == "gemini-2.5-flash" {
+		return "checkpoint"
+	}
+	// Default to agent for unknown models (e.g. future model variants)
+	log.Warnf("resolveRequestType: unknown model %q, defaulting to agent", modelName)
+	return "agent"
+}
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
+	reqType := resolveRequestType(modelName)
 	template, _ := sjson.Set(string(payload), "model", modelName)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
-	template, _ = sjson.Set(template, "requestType", "agent")
-
+	template, _ = sjson.Set(template, "requestType", reqType)
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
 	if projectID != "" {
 		template, _ = sjson.Set(template, "project", projectID)
 	} else {
 		template, _ = sjson.Set(template, "project", generateProjectID())
 	}
-	template, _ = sjson.Set(template, "requestId", generateRequestID())
-	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
 
+	sessionID := generateStableSessionID(payload)
+	template, _ = sjson.Set(template, "requestId", generateRequestIDForType(reqType, payload, sessionID))
+
+	// image_gen requests do not include sessionId per real client behavior
+	if reqType != "image_gen" {
+		template, _ = sjson.Set(template, "request.sessionId", sessionID)
+	}
 	template, _ = sjson.Delete(template, "request.safetySettings")
 	if toolConfig := gjson.Get(template, "toolConfig"); toolConfig.Exists() && !gjson.Get(template, "request.toolConfig").Exists() {
 		template, _ = sjson.SetRaw(template, "request.toolConfig", toolConfig.Raw)
@@ -1754,8 +1781,109 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	return []byte(template)
 }
 
-func generateRequestID() string {
-	return "agent-" + uuid.NewString()
+// geminiToAntigravityWebSearch wraps a web search payload for Antigravity.
+// Web search requests have no requestId, no userAgent, and no sessionId per real client behavior.
+func geminiToAntigravityWebSearch(payload []byte, projectID string) []byte {
+	template := string(payload)
+	if projectID != "" {
+		template, _ = sjson.Set(template, "project", projectID)
+	} else {
+		template, _ = sjson.Set(template, "project", generateProjectID())
+	}
+	template, _ = sjson.Delete(template, "request.safetySettings")
+	return []byte(template)
+}
+
+// generateRequestIDForType dispatches to the correct requestId format based on requestType.
+func generateRequestIDForType(reqType string, payload []byte, sessionID string) string {
+	switch reqType {
+	case "checkpoint":
+		return "checkpoint/" + uuid.NewString()
+	case "agent", "image_gen", "browser_subagent":
+		return generateTimestampRequestID(reqType, payload, sessionID)
+	default:
+		return generateTimestampRequestID("agent", payload, sessionID)
+	}
+}
+
+// generateTimestampRequestID creates a requestId in the format: {prefix}/{unix_ms}/{conversation_uuid}/{step_counter}
+func generateTimestampRequestID(prefix string, payload []byte, sessionID string) string {
+	ts := time.Now().UnixMilli()
+	convUUID := deriveConversationUUID(sessionID)
+
+	lastStep := parseLastStepID(payload)
+	var counter int
+	if lastStep > 0 {
+		counter = lastStep + 2
+	} else if hasModelContent(payload) {
+		// Has model responses but no step IDs (proxy-generated content)
+		counter = 1
+	} else {
+		// First message, no prior conversation
+		counter = 2
+	}
+
+	return fmt.Sprintf("%s/%d/%s/%d", prefix, ts, convUUID, counter)
+}
+
+// parseLastStepID extracts the maximum Step Id from request contents.
+func parseLastStepID(payload []byte) int {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if !contents.IsArray() {
+		return 0
+	}
+	maxStep := 0
+	for _, content := range contents.Array() {
+		if content.Get("role").String() != "model" {
+			continue
+		}
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		for _, part := range parts.Array() {
+			text := part.Get("text").String()
+			if idx := strings.Index(text, "Step Id: "); idx >= 0 {
+				numStr := text[idx+9:]
+				if endIdx := strings.IndexAny(numStr, " \n\r\t"); endIdx > 0 {
+					numStr = numStr[:endIdx]
+				}
+				if n, err := strconv.Atoi(numStr); err == nil && n > maxStep {
+					maxStep = n
+				}
+			}
+		}
+	}
+	return maxStep
+}
+
+// hasModelContent checks whether the request payload contains any model-role entries.
+func hasModelContent(payload []byte) bool {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if !contents.IsArray() {
+		return false
+	}
+	for _, content := range contents.Array() {
+		if content.Get("role").String() == "model" {
+			return true
+		}
+	}
+	return false
+}
+
+// deriveConversationUUID generates a stable UUID v4 from a sessionId hash,
+// ensuring the same conversation always produces the same conversation UUID.
+func deriveConversationUUID(sessionID string) string {
+	h := sha256.Sum256([]byte(sessionID))
+	// Set UUID version 4 bits
+	h[6] = (h[6] & 0x0f) | 0x40
+	// Set UUID variant bits
+	h[8] = (h[8] & 0x3f) | 0x80
+	u, err := uuid.FromBytes(h[:16])
+	if err != nil {
+		return uuid.NewString()
+	}
+	return u.String()
 }
 
 func generateSessionID() string {
@@ -1850,7 +1978,7 @@ func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *
 			projectID = strings.TrimSpace(pid)
 		}
 	}
-	geminiPayload = string(geminiToAntigravity(webSearchGeminiModel, []byte(geminiPayload), projectID))
+	geminiPayload = string(geminiToAntigravityWebSearch([]byte(geminiPayload), projectID))
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
