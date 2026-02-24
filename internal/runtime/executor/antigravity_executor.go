@@ -760,15 +760,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		auth = updatedAuth
 	}
 
-	// Web search tool + Claude model: route to Gemini instead (Claude doesn't support web_search natively)
+	// Web search tool + Claude model: use multi-round orchestrator for streaming
+	// Only if no other (non-web_search) tools that require client-side handling
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
-	if isClaude && doWebSearchTool(req.Payload) {
-		log.Debugf("antigravity executor: web_search tool detected, using Gemini for stream: %s", req.Model)
-		chunks, wsErr := e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
-		if wsErr != nil {
-			return nil, wsErr
-		}
-		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+	if isClaude && doWebSearchTool(req.Payload) && hasOnlyWebSearchTools(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using orchestrator for stream: %s", req.Model)
+		return e.orchestrateWebSearchStream(ctx, auth, token, req, opts)
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -1935,6 +1932,22 @@ func doWebSearchTool(payload []byte) bool {
 	return false
 }
 
+// hasOnlyWebSearchTools returns true if all tools in the payload are web_search type tools.
+// Returns false if there are additional (non-web_search) tools that would need client-side handling.
+func hasOnlyWebSearchTools(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return true
+	}
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		if !strings.HasPrefix(toolType, "web_search") {
+			return false
+		}
+	}
+	return true
+}
+
 func extractUserQuery(payload []byte) string {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
@@ -1958,6 +1971,114 @@ func extractUserQuery(payload []byte) string {
 		}
 	}
 	return ""
+}
+
+
+// isVertexAISearchURL checks if a URL is a legitimate Google VertexAI Search redirect URL.
+// Validates scheme (https only) and exact host match to prevent SSRF.
+func isVertexAISearchURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" && parsed.Host == "vertexaisearch.cloud.google.com"
+}
+
+// resolveRedirectURL resolves a Google vertexaisearch redirect URL to the actual destination URL.
+// If the URL is not a redirect or resolution fails, the original URL is returned unchanged.
+func resolveRedirectURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, rawURL string) string {
+	if !isVertexAISearchURL(rawURL) {
+		return rawURL
+	}
+	client := newProxyAwareHTTPClient(ctx, cfg, auth, 5*time.Second)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+	if err != nil {
+		log.Debugf("resolveRedirectURL: failed to create request for %s: %v", rawURL, err)
+		return rawURL
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Debugf("resolveRedirectURL: request failed for %s: %v", rawURL, err)
+		return rawURL
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if location := resp.Header.Get("Location"); location != "" {
+			// Only accept absolute HTTPS URLs as redirect targets
+			if parsed, parseErr := url.Parse(location); parseErr == nil && parsed.Scheme == "https" && parsed.Host != "" {
+				log.Debugf("resolveRedirectURL: resolved %s -> %s", rawURL, location)
+				return location
+			}
+		}
+	}
+	return rawURL
+}
+
+// resolveRedirectURLsConcurrent resolves multiple redirect URLs concurrently.
+// Returns a mapping from original URL to resolved URL.
+func resolveRedirectURLsConcurrent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, urls []string) map[string]string {
+	resolved := make(map[string]string, len(urls))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // max 5 concurrent resolutions
+	for _, u := range urls {
+		if !isVertexAISearchURL(u) {
+			mu.Lock()
+			resolved[u] = u
+			mu.Unlock()
+			continue
+		}
+		wg.Add(1)
+		go func(rawURL string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			result := resolveRedirectURL(ctx, cfg, auth, rawURL)
+			mu.Lock()
+			resolved[rawURL] = result
+			mu.Unlock()
+		}(u)
+	}
+	wg.Wait()
+	return resolved
+}
+
+// resolveGeminiResponseURLs resolves all redirect URLs in a Gemini response's groundingChunks.
+func resolveGeminiResponseURLs(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, geminiResp []byte) []byte {
+	basePath := "response.candidates.0.groundingMetadata.groundingChunks"
+	chunks := gjson.GetBytes(geminiResp, basePath)
+	if !chunks.IsArray() {
+		basePath = "candidates.0.groundingMetadata.groundingChunks"
+		chunks = gjson.GetBytes(geminiResp, basePath)
+	}
+	if !chunks.IsArray() {
+		return geminiResp
+	}
+	var urls []string
+	for _, chunk := range chunks.Array() {
+		if uri := chunk.Get("web.uri").String(); uri != "" {
+			urls = append(urls, uri)
+		}
+	}
+	if len(urls) == 0 {
+		return geminiResp
+	}
+	resolved := resolveRedirectURLsConcurrent(ctx, cfg, auth, urls)
+	result := string(geminiResp)
+	for i, chunk := range chunks.Array() {
+		uri := chunk.Get("web.uri").String()
+		if uri == "" {
+			continue
+		}
+		if resolvedURL, ok := resolved[uri]; ok && resolvedURL != uri {
+			path := fmt.Sprintf("%s.%d.web.uri", basePath, i)
+			result, _ = sjson.Set(result, path, resolvedURL)
+		}
+	}
+	return []byte(result)
 }
 
 func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *cliproxyauth.Auth, token, query string) ([]byte, error) {
@@ -2037,6 +2158,7 @@ func (e *AntigravityExecutor) executeWebSearchOnly(ctx context.Context, auth *cl
 		reporter.publishFailure(ctx)
 		return cliproxyexecutor.Response{}, err
 	}
+	geminiResp = resolveGeminiResponseURLs(ctx, e.cfg, auth, geminiResp)
 
 	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
 	claudeResp := convertGeminiToClaudeNonStream(req.Model, geminiResp)
@@ -2059,6 +2181,7 @@ func (e *AntigravityExecutor) executeWebSearchOnlyStream(ctx context.Context, au
 		reporter.publishFailure(ctx)
 		return nil, err
 	}
+	geminiResp = resolveGeminiResponseURLs(ctx, e.cfg, auth, geminiResp)
 
 	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
 
