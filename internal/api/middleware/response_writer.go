@@ -289,14 +289,16 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	// Determine body visibility based on final status when force-logging (request-log disabled):
-	//   - Success (200) or resource errors (429/503): hide bodies, only log timestamps and statuses
-	//   - Client/server errors (400, 500, etc.): show full bodies for debugging
-	// When request-log is enabled: always show bodies (user explicitly wants detailed logs).
+	// Determine body visibility based on final status when retries occurred.
+	// Only show full bodies for real errors (4xx except 429, 5xx except 503) — these need debugging.
+	// For success (200) or resource errors (429/503), hide bodies and only keep retry metadata
+	// (headers, auth account, timestamps).
 	var hideRequestBody, hideSuccessResponseBody bool
-	if forceLog {
-		isResourceError := finalStatusCode == http.StatusTooManyRequests || finalStatusCode == http.StatusServiceUnavailable
-		if !hasAPIError || isResourceError {
+	if hasRetryAttempts {
+		isRealError := finalStatusCode >= http.StatusBadRequest &&
+			finalStatusCode != http.StatusTooManyRequests &&
+			finalStatusCode != http.StatusServiceUnavailable
+		if !isRealError {
 			hideRequestBody = true
 			hideSuccessResponseBody = true
 		}
@@ -326,6 +328,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		if len(apiResponse) > 0 {
 			_ = w.streamWriter.WriteAPIResponse(apiResponse)
 		}
+		if hideRequestBody {
+			if setter, ok := w.streamWriter.(interface{ SetHideRequestBody(bool) }); ok {
+				setter.SetHideRequestBody(true)
+			}
+		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
 			return err
@@ -334,7 +341,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	requestBody := w.extractRequestBody(c)
+	if hideRequestBody {
+		requestBody = []byte("<omitted>")
+	}
+	return w.logRequest(requestBody, finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
