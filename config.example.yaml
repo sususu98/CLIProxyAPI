@@ -114,6 +114,21 @@ nonstream-keepalive-interval: 0
 # When false, client signatures are used directly after normalization (bypass mode for testing).
 # antigravity-signature-cache-enabled: true
 
+# Antigravity User-Agent configuration.
+# Controls the User-Agent header sent to upstream Antigravity APIs.
+#
+# Resolution priority (highest to lowest):
+#   1. Per-auth user_agent attribute (auth file's "attributes.user_agent" field)
+#   2. Per-auth user_agent metadata (auth file's "metadata.user_agent" field)
+#   3. This config section (antigravity-user-agents)
+#   4. Compiled default constants
+#
+# Hot-reloadable: changes take effect on config file save.
+# Note: in-flight requests may continue using the previous UA until they complete.
+# antigravity-user-agents:
+#   api: "antigravity/1.18.4 darwin/arm64"                                       # UA for AI requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels)
+#   client: "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0"    # UA for init/management requests (loadCodeAssist, onboardUser, setUserSettings)
+
 
 # Gemini API keys
 # gemini-api-key:

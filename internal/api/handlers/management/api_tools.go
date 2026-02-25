@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -434,7 +435,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		_, _ = h.authManager.Update(ctx, auth)
 	}
 
-	applyAntigravityUserSettings(ctx, auth, strings.TrimSpace(tokenResp.AccessToken), h.apiCallTransport(auth))
+	applyAntigravityUserSettings(ctx, auth, strings.TrimSpace(tokenResp.AccessToken), h.apiCallTransport(auth), h.cfg)
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil
 }
@@ -460,7 +461,7 @@ func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
 	return true
 }
 
-func applyAntigravityUserSettings(ctx context.Context, auth *coreauth.Auth, accessToken string, transport http.RoundTripper) {
+func applyAntigravityUserSettings(ctx context.Context, auth *coreauth.Auth, accessToken string, transport http.RoundTripper, cfg *config.Config) {
 	if strings.TrimSpace(accessToken) == "" {
 		return
 	}
@@ -483,7 +484,7 @@ func applyAntigravityUserSettings(ctx context.Context, auth *coreauth.Auth, acce
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0")
+	req.Header.Set("User-Agent", resolveAntigravityUA(cfg).ResolveClientAgent())
 	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
 	req.Header.Set("Connection", "keep-alive")
 
@@ -830,7 +831,7 @@ func (h *Handler) performAntigravityAuthCheck(ctx context.Context, auth *coreaut
 
 	baseURLs := authCheckBaseURLs(auth)
 
-	userAgent := "antigravity/1.18.4 darwin/arm64"
+	userAgent := resolveAntigravityUA(h.cfg).ResolveAPIAgent()
 	if auth.Attributes != nil {
 		if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
 			userAgent = ua
@@ -1067,4 +1068,13 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
+}
+
+
+// resolveAntigravityUA returns the AntigravityUserAgents config, nil-safe.
+func resolveAntigravityUA(cfg *config.Config) config.AntigravityUserAgents {
+	if cfg != nil {
+		return cfg.AntigravityUserAgents
+	}
+	return config.AntigravityUserAgents{}
 }

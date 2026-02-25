@@ -21,6 +21,14 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+
+	// DefaultAntigravityAPIAgent is the default User-Agent for Antigravity API requests
+	// (streamGenerateContent, generateContent, countTokens, fetchAvailableModels).
+	DefaultAntigravityAPIAgent = "antigravity/1.18.4 darwin/arm64"
+
+	// DefaultAntigravityClientAgent is the default User-Agent for Antigravity client/management
+	// requests (loadCodeAssist, onboardUser, setUserSettings).
+	DefaultAntigravityClientAgent = "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -89,6 +97,10 @@ type Config struct {
 	// When false, client signatures are used directly after normalization (bypass mode).
 	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
 
+	// AntigravityUserAgents configures default User-Agent headers for Antigravity upstream API requests.
+	// Per-auth user_agent attribute (in auth file metadata) takes precedence over these global defaults.
+	AntigravityUserAgents AntigravityUserAgents `yaml:"antigravity-user-agents" json:"antigravity-user-agents"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -136,6 +148,46 @@ type ClaudeHeaderDefaults struct {
 	PackageVersion string `yaml:"package-version" json:"package-version"`
 	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
 	Timeout        string `yaml:"timeout" json:"timeout"`
+}
+
+// AntigravityUserAgents configures default User-Agent headers for Antigravity upstream API requests.
+//
+// Resolution priority (highest to lowest):
+//  1. Per-auth user_agent attribute (auth file's "attributes.user_agent" field)
+//  2. Per-auth user_agent metadata (auth file's "metadata.user_agent" field)
+//  3. This config section (antigravity-user-agents in config.yaml)
+//  4. Compiled default constants (DefaultAntigravityAPIAgent / DefaultAntigravityClientAgent)
+//
+// Hot-reloadable: changes take effect on config file save without restarting the server.
+// Note: in-flight requests may continue using the previous UA until they complete.
+type AntigravityUserAgents struct {
+	// API is the User-Agent header for AI generation requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels).
+	// Default: "antigravity/1.18.4 darwin/arm64"
+	API string `yaml:"api" json:"api"`
+
+	// Client is the User-Agent header for initialization/management requests (loadCodeAssist, onboardUser, setUserSettings).
+	// Default: "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0"
+	Client string `yaml:"client" json:"client"`
+}
+
+// ResolveAPIAgent returns the effective API User-Agent.
+// Priority: config value > DefaultAntigravityAPIAgent.
+// Callers that also need per-auth overrides should check auth.Attributes/Metadata
+// before calling this method.
+func (u AntigravityUserAgents) ResolveAPIAgent() string {
+	if v := strings.TrimSpace(u.API); v != "" {
+		return v
+	}
+	return DefaultAntigravityAPIAgent
+}
+
+// ResolveClientAgent returns the effective Client User-Agent.
+// Priority: config value > DefaultAntigravityClientAgent.
+func (u AntigravityUserAgents) ResolveClientAgent() string {
+	if v := strings.TrimSpace(u.Client); v != "" {
+		return v
+	}
+	return DefaultAntigravityClientAgent
 }
 
 // TLSConfig holds HTTPS server settings.

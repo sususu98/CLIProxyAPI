@@ -45,7 +45,6 @@ const (
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.18.4 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
@@ -1031,7 +1030,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
@@ -1137,7 +1136,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("User-Agent", resolveUserAgent(cfg, auth))
 		if host := resolveHost(baseURL); host != "" {
 			httpReq.Host = host
 		}
@@ -1284,7 +1283,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		return auth, errReq
 	}
 	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("User-Agent", defaultAntigravityAgent)
+	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -1392,7 +1391,7 @@ func (e *AntigravityExecutor) applyUserSettings(ctx context.Context, auth *clipr
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0")
+	req.Header.Set("User-Agent", e.cfg.AntigravityUserAgents.ResolveClientAgent())
 	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
 	req.Header.Set("Connection", "keep-alive")
 
@@ -1530,7 +1529,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 	if stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -1637,7 +1636,7 @@ func resolveHost(base string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
 
-func resolveUserAgent(auth *cliproxyauth.Auth) string {
+func resolveUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	if auth != nil {
 		if auth.Attributes != nil {
 			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
@@ -1650,7 +1649,11 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			}
 		}
 	}
-	return defaultAntigravityAgent
+	var ua config.AntigravityUserAgents
+	if cfg != nil {
+		ua = cfg.AntigravityUserAgents
+	}
+	return ua.ResolveAPIAgent()
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
@@ -1973,7 +1976,6 @@ func extractUserQuery(payload []byte) string {
 	return ""
 }
 
-
 // isVertexAISearchURL checks if a URL is a legitimate Google VertexAI Search redirect URL.
 // Validates scheme (https only) and exact host match to prevent SSRF.
 func isVertexAISearchURL(rawURL string) bool {
@@ -2114,7 +2116,7 @@ func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host

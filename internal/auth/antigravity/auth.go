@@ -31,20 +31,31 @@ type userInfo struct {
 
 // AntigravityAuth handles Antigravity OAuth authentication
 type AntigravityAuth struct {
+	cfg        *config.Config
 	httpClient *http.Client
 }
 
 // NewAntigravityAuth creates a new Antigravity auth service.
 func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *AntigravityAuth {
 	if httpClient != nil {
-		return &AntigravityAuth{httpClient: httpClient}
+		return &AntigravityAuth{cfg: cfg, httpClient: httpClient}
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
 	return &AntigravityAuth{
+		cfg:        cfg,
 		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
 	}
+}
+
+// resolveClientUserAgent returns the User-Agent for client/management API requests.
+// It delegates to config.AntigravityUserAgents.ResolveClientAgent(), with a nil-safe guard.
+func (o *AntigravityAuth) resolveClientUserAgent() string {
+	if o.cfg != nil {
+		return o.cfg.AntigravityUserAgents.ResolveClientAgent()
+	}
+	return config.DefaultAntigravityClientAgent
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
@@ -173,7 +184,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", APIUserAgent)
+	req.Header.Set("User-Agent", o.resolveClientUserAgent())
 	req.Header.Set("X-Goog-Api-Client", APIClient)
 	req.Header.Set("Client-Metadata", ClientMetadata)
 
@@ -277,7 +288,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", APIUserAgent)
+		req.Header.Set("User-Agent", o.resolveClientUserAgent())
 		req.Header.Set("X-Goog-Api-Client", APIClient)
 		req.Header.Set("Client-Metadata", ClientMetadata)
 
