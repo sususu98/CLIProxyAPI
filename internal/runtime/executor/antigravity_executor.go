@@ -759,12 +759,15 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		auth = updatedAuth
 	}
 
-	// Web search tool + Claude model: use multi-round orchestrator for streaming
-	// Only if no other (non-web_search) tools that require client-side handling
+	// Web search tool + Claude model: route to Gemini instead (Claude doesn't support web_search natively)
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
-	if isClaude && doWebSearchTool(req.Payload) && hasOnlyWebSearchTools(req.Payload) {
-		log.Debugf("antigravity executor: web_search tool detected, using orchestrator for stream: %s", req.Model)
-		return e.orchestrateWebSearchStream(ctx, auth, token, req, opts)
+	if isClaude && doWebSearchTool(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for stream: %s", req.Model)
+		chunks, wsErr := e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
+		if wsErr != nil {
+			return nil, wsErr
+		}
+		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -1936,22 +1939,6 @@ func doWebSearchTool(payload []byte) bool {
 		}
 	}
 	return false
-}
-
-// hasOnlyWebSearchTools returns true if all tools in the payload are web_search type tools.
-// Returns false if there are additional (non-web_search) tools that would need client-side handling.
-func hasOnlyWebSearchTools(payload []byte) bool {
-	tools := gjson.GetBytes(payload, "tools")
-	if !tools.IsArray() {
-		return true
-	}
-	for _, tool := range tools.Array() {
-		toolType := tool.Get("type").String()
-		if !strings.HasPrefix(toolType, "web_search") {
-			return false
-		}
-	}
-	return true
 }
 
 func extractUserQuery(payload []byte) string {
