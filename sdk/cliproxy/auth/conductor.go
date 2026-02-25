@@ -611,8 +611,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
+
 	for {
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -620,6 +628,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				authRotationCount = 0
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -642,6 +657,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -663,12 +682,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		m.MarkResult(execCtx, result)
-		if aliasResult.StripThinkingResponse {
-			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
-		}
-		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
-			resp.Payload = rewriteModelInResponse(resp.Payload, aliasResult.OriginalAlias)
-		}
+		fb.PostProcessResponse(&resp, aliasResult)
 		return resp, nil
 	}
 }
@@ -681,8 +695,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
+
 	for {
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -690,6 +712,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				authRotationCount = 0
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -712,6 +741,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -732,7 +765,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = errExec
 			continue
 		}
-		m.hook.OnResult(execCtx, result)
+		m.MarkResult(execCtx, result)
+		fb.PostProcessResponse(&resp, aliasResult)
 		return resp, nil
 	}
 }
@@ -745,8 +779,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
+
 	for {
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -754,6 +796,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				authRotationCount = 0
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -776,6 +825,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
 		streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -795,10 +848,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
-		stripThinking := aliasResult.StripThinkingResponse
+		effectiveAlias := fb.EffectiveAlias(aliasResult)
+		stripThinking := effectiveAlias.StripThinkingResponse
 		rewriteModel := ""
-		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
-			rewriteModel = aliasResult.OriginalAlias
+		if effectiveAlias.ForceMapping && effectiveAlias.OriginalAlias != "" {
+			rewriteModel = effectiveAlias.OriginalAlias
 		}
 		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool, modelToRewrite string) {
 			defer close(out)
@@ -925,9 +979,18 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 	routeModel := req.Model
 	tried := make(map[string]struct{})
 	var lastErr error
+
+	fb := newFallbackController(routeModel)
+
 	for {
 		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("no more auths for " + routeModel + " (provider=" + provider + ")")
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -949,6 +1012,10 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -965,12 +1032,7 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			continue
 		}
 		m.MarkResult(execCtx, result)
-		if aliasResult.StripThinkingResponse {
-			resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
-		}
-		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
-			resp.Payload = rewriteModelInResponse(resp.Payload, aliasResult.OriginalAlias)
-		}
+		fb.PostProcessResponse(&resp, aliasResult)
 		return resp, nil
 	}
 }
@@ -982,9 +1044,16 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 	routeModel := req.Model
 	tried := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
 	for {
 		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("no more auths for " + routeModel + " (count, provider=" + provider + ")")
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1006,6 +1075,9 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -1022,6 +1094,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 			continue
 		}
 		m.MarkResult(execCtx, result)
+		fb.PostProcessResponse(&resp, aliasResult)
 		return resp, nil
 	}
 }
@@ -1033,9 +1106,18 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 	routeModel := req.Model
 	tried := make(map[string]struct{})
 	var lastErr error
+
+	fb := newFallbackController(routeModel)
+
 	for {
 		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("no more auths for " + routeModel + " (stream, provider=" + provider + ")")
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -1057,6 +1139,10 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
 		streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			rerr := &Error{Message: errStream.Error()}
@@ -1071,10 +1157,11 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
-		stripThinking := aliasResult.StripThinkingResponse
+		effectiveAlias := fb.EffectiveAlias(aliasResult)
+		stripThinking := effectiveAlias.StripThinkingResponse
 		rewriteModel := ""
-		if aliasResult.ForceMapping && aliasResult.OriginalAlias != "" {
-			rewriteModel = aliasResult.OriginalAlias
+		if effectiveAlias.ForceMapping && effectiveAlias.OriginalAlias != "" {
+			rewriteModel = effectiveAlias.OriginalAlias
 		}
 		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool, modelToRewrite string) {
 			defer close(out)
@@ -1772,6 +1859,27 @@ func isRequestInvalidError(err error) bool {
 	errMsg := err.Error()
 	return strings.Contains(errMsg, "invalid_request_error") ||
 		strings.Contains(errMsg, "INVALID_ARGUMENT")
+}
+
+// isModelUnavailableError returns true if the error indicates the model itself
+// is unavailable and a different model should be tried. This covers:
+//   - 503 with capacity-related message (MODEL_CAPACITY_EXHAUSTED)
+//   - 429 rate limiting (all auths exhausted for this model)
+func isModelUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	switch status {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusServiceUnavailable:
+		msg := strings.ToLower(err.Error())
+		return strings.Contains(msg, "capacity") ||
+			strings.Contains(msg, "unavailable")
+	default:
+		return false
+	}
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

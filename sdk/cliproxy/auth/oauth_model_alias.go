@@ -22,6 +22,7 @@ type oauthModelAliasEntry struct {
 	toThinking            string
 	toNonThinking         string
 	stripThinkingResponse bool
+	fallbackModel         string
 }
 
 type oauthModelAliasTable struct {
@@ -35,6 +36,7 @@ type OAuthModelAliasResult struct {
 	ForceMapping          bool   // whether to rewrite model name in responses
 	OriginalAlias         string // the original requested alias (for response rewriting)
 	StripThinkingResponse bool   // whether to strip thinking blocks from response
+	FallbackModel         string // alternative model to try on capacity exhaustion
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -69,6 +71,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 				toThinking:            strings.TrimSpace(entry.ToThinking),
 				toNonThinking:         strings.TrimSpace(entry.ToNonThinking),
 				stripThinkingResponse: entry.StripThinkingResponse,
+				fallbackModel:         strings.TrimSpace(entry.FallbackModel),
 			}
 		}
 		if len(rev) > 0 {
@@ -231,6 +234,7 @@ func resolveUpstreamModelFromAliasTableWithThinking(m *Manager, auth *Auth, requ
 				ForceMapping:          entry.forceMapping,
 				OriginalAlias:         requestedModel,
 				StripThinkingResponse: stripThinking,
+				FallbackModel:         entry.fallbackModel,
 			}
 		}
 
@@ -248,6 +252,7 @@ func resolveUpstreamModelFromAliasTableWithThinking(m *Manager, auth *Auth, requ
 			ForceMapping:          entry.forceMapping,
 			OriginalAlias:         requestedModel,
 			StripThinkingResponse: stripThinking,
+			FallbackModel:         entry.fallbackModel,
 		}
 	}
 

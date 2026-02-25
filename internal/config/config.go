@@ -267,6 +267,10 @@ type RoutingConfig struct {
 //   - ToThinking: target for requests with thinking.type=enabled
 //   - ToNonThinking: target for requests without thinking enabled
 //   - StripThinkingResponse: remove thinking blocks from response
+//
+// FallbackModel specifies an alternative upstream model to try when the primary
+// model returns a capacity-exhausted error (503). This enables transparent model
+// fallback without changing the client-visible model name.
 type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
@@ -277,6 +281,8 @@ type OAuthModelAlias struct {
 	ToThinking            string `yaml:"to-thinking,omitempty" json:"to-thinking,omitempty"`
 	ToNonThinking         string `yaml:"to-non-thinking,omitempty" json:"to-non-thinking,omitempty"`
 	StripThinkingResponse bool   `yaml:"strip-thinking-response,omitempty" json:"strip-thinking-response,omitempty"`
+
+	FallbackModel string `yaml:"fallback-model,omitempty" json:"fallback-model,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -861,6 +867,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				ToThinking:            toThinking,
 				ToNonThinking:         toNonThinking,
 				StripThinkingResponse: entry.StripThinkingResponse,
+				FallbackModel:         strings.TrimSpace(entry.FallbackModel),
 			})
 		}
 		if len(clean) > 0 {

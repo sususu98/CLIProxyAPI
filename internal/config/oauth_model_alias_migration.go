@@ -214,6 +214,8 @@ func parseAliasEntry(node *yaml.Node) OAuthModelAlias {
 			entry.Alias = strings.TrimSpace(valNode.Value)
 		case "fork":
 			entry.Fork = strings.ToLower(strings.TrimSpace(valNode.Value)) == "true"
+		case "fallback-model":
+			entry.FallbackModel = strings.TrimSpace(valNode.Value)
 		}
 	}
 	return entry
