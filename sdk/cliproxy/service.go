@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -1380,7 +1381,7 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		if strings.EqualFold(name, alias) {
 			continue
 		}
-		key := strings.ToLower(name)
+		key := strings.ToLower(thinking.ParseSuffix(name).ModelName)
 		forward[key] = append(forward[key], aliasEntry{alias: alias, fork: aliases[i].Fork})
 	}
 	if len(forward) == 0 {
