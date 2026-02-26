@@ -217,3 +217,29 @@ func TestFallbackController_Lifecycle(t *testing.T) {
 		}
 	})
 }
+
+func TestFallbackController_Model(t *testing.T) {
+	t.Run("returns empty when no fallback configured", func(t *testing.T) {
+		fc := newFallbackController("model-a")
+		if got := fc.Model(); got != "" {
+			t.Errorf("Model() = %q, want empty", got)
+		}
+	})
+
+	t.Run("returns fallback model after capture", func(t *testing.T) {
+		fc := newFallbackController("model-a")
+		fc.Capture(OAuthModelAliasResult{FallbackModel: "model-b"})
+		if got := fc.Model(); got != "model-b" {
+			t.Errorf("Model() = %q, want model-b", got)
+		}
+	})
+
+	t.Run("returns first captured fallback model", func(t *testing.T) {
+		fc := newFallbackController("model-a")
+		fc.Capture(OAuthModelAliasResult{FallbackModel: "model-b"})
+		fc.Capture(OAuthModelAliasResult{FallbackModel: "model-c"})
+		if got := fc.Model(); got != "model-b" {
+			t.Errorf("Model() = %q, want model-b (first capture)", got)
+		}
+	})
+}

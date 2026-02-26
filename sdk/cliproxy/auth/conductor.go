@@ -617,6 +617,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -630,6 +631,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if errPick != nil {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
 				authRotationCount = 0
 				tried = make(map[string]struct{})
 				lastErr = nil
@@ -701,6 +703,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -714,6 +717,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if errPick != nil {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
 				authRotationCount = 0
 				tried = make(map[string]struct{})
 				lastErr = nil
@@ -785,6 +789,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -798,6 +803,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errPick != nil {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
 				authRotationCount = 0
 				tried = make(map[string]struct{})
 				lastErr = nil
@@ -987,6 +993,7 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		if errPick != nil {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("no more auths for " + routeModel + " (provider=" + provider + ")")
+				routeModel = fb.Model()
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -1050,6 +1057,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		if errPick != nil {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("no more auths for " + routeModel + " (count, provider=" + provider + ")")
+				routeModel = fb.Model()
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -1114,6 +1122,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		if errPick != nil {
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("no more auths for " + routeModel + " (stream, provider=" + provider + ")")
+				routeModel = fb.Model()
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue

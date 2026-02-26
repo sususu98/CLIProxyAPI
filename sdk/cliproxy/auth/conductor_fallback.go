@@ -99,6 +99,11 @@ func (fc *fallbackController) Used() bool {
 	return fc.used
 }
 
+// Model returns the fallback model name.
+func (fc *fallbackController) Model() string {
+	return fc.pendingFallback
+}
+
 // isCapacityExhaustedError returns true for 503 errors indicating model-level
 // capacity exhaustion. Kept separate from isModelUnavailableError for potential
 // future use in differentiated retry strategies.
