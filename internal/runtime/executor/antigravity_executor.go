@@ -1747,7 +1747,7 @@ func resolveRequestType(modelName string) string {
 			return "agent"
 		}
 	}
-	if modelName == "gemini-3-pro-image" {
+	if modelName == "gemini-3-pro-image" || modelName == "gemini-3.1-flash-image" {
 		return "image_gen"
 	}
 	if modelName == "gemini-2.5-flash-lite" || modelName == "gemini-2.5-flash" {
