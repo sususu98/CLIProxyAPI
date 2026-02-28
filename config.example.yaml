@@ -126,8 +126,8 @@ nonstream-keepalive-interval: 0
 # Hot-reloadable: changes take effect on config file save.
 # Note: in-flight requests may continue using the previous UA until they complete.
 # antigravity-user-agents:
-#   api: "antigravity/1.18.4 darwin/arm64"                                       # UA for AI requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels)
-#   client: "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0"    # UA for init/management requests (loadCodeAssist, onboardUser, setUserSettings)
+#   api: "antigravity/1.19.6 darwin/arm64"                                       # UA for AI/code-assist requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels, loadCodeAssist)
+#   client: "antigravity/1.19.6 darwin/arm64 google-api-nodejs-client/10.3.0"    # UA for management/user-info requests (onboardUser, setUserSettings, fetchUserInfo)
 
 
 # Gemini API keys

@@ -23,12 +23,12 @@ const (
 	DefaultPprofAddr             = "127.0.0.1:8316"
 
 	// DefaultAntigravityAPIAgent is the default User-Agent for Antigravity API requests
-	// (streamGenerateContent, generateContent, countTokens, fetchAvailableModels).
-	DefaultAntigravityAPIAgent = "antigravity/1.18.4 darwin/arm64"
+	// (streamGenerateContent, generateContent, countTokens, fetchAvailableModels, loadCodeAssist).
+	DefaultAntigravityAPIAgent = "antigravity/1.19.6 darwin/arm64"
 
 	// DefaultAntigravityClientAgent is the default User-Agent for Antigravity client/management
-	// requests (loadCodeAssist, onboardUser, setUserSettings).
-	DefaultAntigravityClientAgent = "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0"
+	// requests (onboardUser, setUserSettings, fetchUserInfo).
+	DefaultAntigravityClientAgent = "antigravity/1.19.6 darwin/arm64 google-api-nodejs-client/10.3.0"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -161,12 +161,12 @@ type ClaudeHeaderDefaults struct {
 // Hot-reloadable: changes take effect on config file save without restarting the server.
 // Note: in-flight requests may continue using the previous UA until they complete.
 type AntigravityUserAgents struct {
-	// API is the User-Agent header for AI generation requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels).
-	// Default: "antigravity/1.18.4 darwin/arm64"
+	// API is the User-Agent header for AI generation and code-assist requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels, loadCodeAssist).
+	// Default: "antigravity/1.19.6 darwin/arm64"
 	API string `yaml:"api" json:"api"`
 
-	// Client is the User-Agent header for initialization/management requests (loadCodeAssist, onboardUser, setUserSettings).
-	// Default: "antigravity/1.107.0 darwin/arm64 google-api-nodejs-client/10.3.0"
+	// Client is the User-Agent header for management/user-info requests (onboardUser, setUserSettings, fetchUserInfo).
+	// Default: "antigravity/1.19.6 darwin/arm64 google-api-nodejs-client/10.3.0"
 	Client string `yaml:"client" json:"client"`
 }
 

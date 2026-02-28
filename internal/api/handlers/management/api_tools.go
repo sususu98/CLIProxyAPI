@@ -376,7 +376,11 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	if errReq != nil {
 		return "", errReq
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	req.Header.Set("User-Agent", "google-api-nodejs-client/10.3.0")
+	req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	req.Header.Set("Connection", "keep-alive")
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
@@ -874,7 +878,7 @@ func (h *Handler) performAntigravityAuthCheck(ctx context.Context, auth *coreaut
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", userAgent)
-		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.ContentLength = -1 // Force chunked transfer encoding to match real client
 
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
@@ -1069,7 +1073,6 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
 }
-
 
 // resolveAntigravityUA returns the AntigravityUserAgents config, nil-safe.
 func resolveAntigravityUA(cfg *config.Config) config.AntigravityUserAgents {

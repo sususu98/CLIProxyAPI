@@ -1034,7 +1034,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
-		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
 		}
@@ -1285,9 +1284,11 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if errReq != nil {
 		return auth, errReq
 	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Accept", "*/*")
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	httpReq.Header.Set("User-Agent", "google-api-nodejs-client/10.3.0")
+	httpReq.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	httpReq.Header.Set("Connection", "keep-alive")
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
@@ -1533,15 +1534,15 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
-	if stream {
-		httpReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		httpReq.Header.Set("Accept", "application/json")
-	}
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
 
+	// Real Antigravity client uses chunked transfer encoding for streaming requests;
+	// override Content-Length set by NewRequestWithContext (from strings.Reader.Len()).
+	if stream {
+		httpReq.ContentLength = -1
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -2107,7 +2108,6 @@ func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
-		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
 		}

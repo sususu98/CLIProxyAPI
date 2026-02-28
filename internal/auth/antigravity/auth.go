@@ -58,6 +58,15 @@ func (o *AntigravityAuth) resolveClientUserAgent() string {
 	return config.DefaultAntigravityClientAgent
 }
 
+// resolveAPIUserAgent returns the User-Agent for API/code-assist requests.
+// It delegates to config.AntigravityUserAgents.ResolveAPIAgent(), with a nil-safe guard.
+func (o *AntigravityAuth) resolveAPIUserAgent() string {
+	if o.cfg != nil {
+		return o.cfg.AntigravityUserAgents.ResolveAPIAgent()
+	}
+	return config.DefaultAntigravityAPIAgent
+}
+
 // BuildAuthURL generates the OAuth authorization URL.
 func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
 	if strings.TrimSpace(redirectURI) == "" {
@@ -87,8 +96,11 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 	if err != nil {
 		return nil, fmt.Errorf("antigravity token exchange: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	req.Header.Set("User-Agent", NodeClientUA)
+	req.Header.Set("X-Goog-Api-Client", NodeGoogAPIClient)
+	req.Header.Set("Connection", "keep-alive")
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
 		return nil, fmt.Errorf("antigravity token exchange: execute request: %w", errDo)
@@ -128,7 +140,11 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 	if err != nil {
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", o.resolveClientUserAgent())
+	req.Header.Set("X-Goog-Api-Client", NodeGoogAPIClient)
+	req.Header.Set("Connection", "keep-alive")
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -184,9 +200,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", o.resolveClientUserAgent())
-	req.Header.Set("X-Goog-Api-Client", APIClient)
-	req.Header.Set("Client-Metadata", ClientMetadata)
+	req.Header.Set("User-Agent", o.resolveAPIUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -286,11 +300,12 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			cancel()
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
+		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", o.resolveClientUserAgent())
-		req.Header.Set("X-Goog-Api-Client", APIClient)
-		req.Header.Set("Client-Metadata", ClientMetadata)
+		req.Header.Set("X-Goog-Api-Client", NodeGoogAPIClient)
+		req.Header.Set("Connection", "keep-alive")
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {
