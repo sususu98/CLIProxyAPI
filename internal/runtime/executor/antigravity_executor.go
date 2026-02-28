@@ -1750,6 +1750,9 @@ func resolveRequestType(modelName string) string {
 	if modelName == "gemini-2.5-flash-lite" || modelName == "gemini-2.5-flash" {
 		return "checkpoint"
 	}
+	if modelName == "tab_jump_flash_lite_preview" || modelName == "tab_flash_lite_preview" {
+		return "tab"
+	}
 	// Default to agent for unknown models (e.g. future model variants)
 	log.Warnf("resolveRequestType: unknown model %q, defaulting to agent", modelName)
 	return "agent"
@@ -1797,8 +1800,8 @@ func geminiToAntigravityWebSearch(payload []byte, projectID string) []byte {
 // generateRequestIDForType dispatches to the correct requestId format based on requestType.
 func generateRequestIDForType(reqType string, payload []byte, sessionID string) string {
 	switch reqType {
-	case "checkpoint":
-		return "checkpoint/" + uuid.NewString()
+	case "checkpoint", "tab":
+		return reqType + "/" + uuid.NewString()
 	case "agent", "image_gen", "browser_subagent":
 		return generateTimestampRequestID(reqType, payload, sessionID)
 	default:
