@@ -11,7 +11,7 @@ import (
 // fallbackController manages the model fallback state machine.
 //
 // When the primary model fails on ALL auth credentials (exhausting
-// max-auth-rotations and request-retry), the controller triggers a
+// max-retry-credentials and request-retry), the controller triggers a
 // fallback to the configured alternative model. This covers both
 // 503 capacity-exhausted and 429 rate-limit scenarios.
 //
@@ -42,7 +42,7 @@ func (fc *fallbackController) Capture(result OAuthModelAliasResult) {
 // ShouldFallback returns true when all auths are exhausted and the last
 // error was a model-unavailable error (503 capacity or 429 rate limit).
 // The caller should invoke this at auth-exhaustion boundaries:
-//   - when authRotationCount >= maxAuthRotations
+//   - when len(tried) >= maxRetryCredentials
 //   - when pickNext returns no more auths (errPick != nil)
 func (fc *fallbackController) ShouldFallback(lastErr error) bool {
 	return !fc.used && fc.pendingFallback != "" && isModelUnavailableError(lastErr)

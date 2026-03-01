@@ -632,7 +632,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
 				routeModel = fb.Model()
-				authRotationCount = 0
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -718,7 +717,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
 				routeModel = fb.Model()
-				authRotationCount = 0
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
@@ -804,7 +802,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if fb.ShouldFallback(lastErr) {
 				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
 				routeModel = fb.Model()
-				authRotationCount = 0
 				tried = make(map[string]struct{})
 				lastErr = nil
 				continue
