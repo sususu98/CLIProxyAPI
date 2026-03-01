@@ -131,6 +131,7 @@ func TestThinkingEnabledFromClaude_AdaptiveType(t *testing.T) {
 	}{
 		{"enabled", `{"thinking":{"type":"enabled","budget_tokens":8000}}`, true, true},
 		{"adaptive", `{"thinking":{"type":"adaptive"}}`, true, true},
+		{"auto", `{"thinking":{"type":"auto"}}`, true, true},
 		{"disabled", `{"thinking":{"type":"disabled"}}`, false, true},
 		{"no_thinking", `{}`, false, false},
 	}

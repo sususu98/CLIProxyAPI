@@ -393,7 +393,7 @@ func thinkingEnabledFromClaude(payload []byte) (bool, bool) {
 		}
 	}
 
-	if thinkingType == "enabled" || thinkingType == "adaptive" {
+	if thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto" {
 		return true, true
 	}
 
