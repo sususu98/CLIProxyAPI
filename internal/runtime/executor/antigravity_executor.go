@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -148,62 +147,6 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
-// antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
-// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
-// (and the goroutines managing it) on every request.
-var (
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
-)
-
-func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
-	if base == nil {
-		return nil
-	}
-
-	clone := base.Clone()
-	clone.ForceAttemptHTTP2 = false
-	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
-	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
-	if clone.TLSClientConfig == nil {
-		clone.TLSClientConfig = &tls.Config{}
-	} else {
-		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
-	}
-	// Actively advertise only HTTP/1.1 in the ALPN handshake.
-	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
-	return clone
-}
-
-// initAntigravityTransport creates the shared HTTP/1.1 transport exactly once.
-func initAntigravityTransport() {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		base = &http.Transport{}
-	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
-}
-
-// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
-// The underlying Transport is a singleton to avoid leaking connection pools.
-func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	antigravityTransportOnce.Do(initAntigravityTransport)
-
-	client := newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
-	if client.Transport == nil {
-		client.Transport = antigravityTransport
-		return client
-	}
-
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
-	}
-	return client
-}
-
 // Identifier returns the executor identifier.
 func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 
@@ -249,12 +192,11 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
 	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
-	httpReq.Close = true // sends Connection: close
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -315,7 +257,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -462,7 +404,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -870,7 +812,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -1077,7 +1019,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	payload = deleteJSONField(payload, "request.safetySettings")
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -1108,7 +1050,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		if errReq != nil {
 			return cliproxyexecutor.Response{}, errReq
 		}
-		httpReq.Close = true
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
@@ -1206,7 +1147,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	}
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
 
 	for idx, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
@@ -1225,7 +1166,6 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		if errReq != nil {
 			return fallbackAntigravityPrimaryModels()
 		}
-		httpReq.Close = true
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(cfg, auth))
@@ -1397,12 +1337,13 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if errReq != nil {
 		return auth, errReq
 	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+	httpReq.Header.Set("Accept", "*/*")
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	httpReq.Header.Set("User-Agent", "google-api-nodejs-client/10.3.0")
+	httpReq.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	httpReq.Header.Set("Connection", "keep-alive")
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		return auth, errDo
@@ -1474,7 +1415,7 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 		return nil
 	}
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, httpClient)
 	if errFetch != nil {
 		return errFetch
@@ -1649,7 +1590,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errReq != nil {
 		return nil, errReq
 	}
-	httpReq.Close = true
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
