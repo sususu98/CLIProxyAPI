@@ -1710,14 +1710,13 @@ func TestAdaptiveEffortToBudget(t *testing.T) {
 
 func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_EffortLevels(t *testing.T) {
 	tests := []struct {
-		name           string
-		effort         string
-		expectedBudget int64
+		name   string
+		effort string
 	}{
-		{"low", "low", 4096},
-		{"medium", "medium", 16384},
-		{"high", "high", 32768},
-		{"max", "max", 63998},
+		{"low", "low"},
+		{"medium", "medium"},
+		{"high", "high"},
+		{"max", "max"},
 	}
 
 	for _, tt := range tests {
@@ -1737,8 +1736,8 @@ func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_EffortLevels(t *test
 			if !thinkingConfig.Exists() {
 				t.Fatal("thinkingConfig should exist for adaptive thinking")
 			}
-			if thinkingConfig.Get("thinkingBudget").Int() != tt.expectedBudget {
-				t.Errorf("Expected thinkingBudget %d, got %d", tt.expectedBudget, thinkingConfig.Get("thinkingBudget").Int())
+			if thinkingConfig.Get("thinkingLevel").String() != "high" {
+				t.Errorf("Expected thinkingLevel \"high\", got %q", thinkingConfig.Get("thinkingLevel").String())
 			}
 			if !thinkingConfig.Get("includeThoughts").Bool() {
 				t.Error("includeThoughts should be true")
@@ -1761,8 +1760,8 @@ func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_NoEffort(t *testing.
 	if !thinkingConfig.Exists() {
 		t.Fatal("thinkingConfig should exist for adaptive thinking without effort")
 	}
-	if thinkingConfig.Get("thinkingBudget").Int() != 32768 {
-		t.Errorf("Expected default thinkingBudget 32768, got %d", thinkingConfig.Get("thinkingBudget").Int())
+	if thinkingConfig.Get("thinkingLevel").String() != "high" {
+		t.Errorf("Expected default thinkingLevel \"high\", got %q", thinkingConfig.Get("thinkingLevel").String())
 	}
 	if !thinkingConfig.Get("includeThoughts").Bool() {
 		t.Error("includeThoughts should be true")

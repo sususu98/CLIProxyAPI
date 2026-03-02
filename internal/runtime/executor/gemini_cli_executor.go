@@ -14,12 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -80,7 +79,7 @@ func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	applyGeminiCLIHeaders(req)
+	applyGeminiCLIHeaders(req, "unknown")
 	return nil
 }
 
@@ -194,7 +193,7 @@ modelLoop:
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP)
+		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
@@ -362,7 +361,7 @@ modelLoop:
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP)
+		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "text/event-stream")
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
@@ -565,7 +564,7 @@ modelLoop:
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP)
+		applyGeminiCLIHeaders(reqHTTP, baseModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
@@ -804,21 +803,11 @@ func stringValue(m map[string]any, key string) string {
 }
 
 // applyGeminiCLIHeaders sets required headers for the Gemini CLI upstream.
-func applyGeminiCLIHeaders(r *http.Request) {
-	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
-	}
-
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", "google-api-nodejs-client/9.15.1")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Goog-Api-Client", "gl-node/22.17.0")
-	misc.EnsureHeader(r.Header, ginHeaders, "Client-Metadata", geminiCLIClientMetadata())
-}
-
-// geminiCLIClientMetadata returns a compact metadata string required by upstream.
-func geminiCLIClientMetadata() string {
-	// Keep parity with CLI client defaults
-	return "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+// User-Agent is always forced to the GeminiCLI format regardless of the client's value,
+// so that upstream identifies the request as a native GeminiCLI client.
+func applyGeminiCLIHeaders(r *http.Request, model string) {
+	r.Header.Set("User-Agent", misc.GeminiCLIUserAgent(model))
+	r.Header.Set("X-Goog-Api-Client", misc.GeminiCLIApiClientHeader)
 }
 
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
@@ -980,8 +969,7 @@ func FetchGeminiCLIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	applyGeminiCLIHeaders(httpReq)
-
+	applyGeminiCLIHeaders(httpReq, "unknown")
 	// 4. Execute
 	httpClient := newHTTPClient(ctx, cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
