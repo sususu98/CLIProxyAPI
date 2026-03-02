@@ -952,7 +952,7 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"gemini-3-pro-high":           {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3-pro-low":            {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3-pro-image":          {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
-		"gemini-3.1-pro-high":         {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
+		"gemini-3.1-pro-high":         {Thinking: &ThinkingSupport{Min: 128, Max: 65535, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "medium", "high"}}},
 		"gemini-3.1-pro-low":          {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3.1-flash-image":      {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "high"}}},
 		"gemini-3-flash":              {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}},
