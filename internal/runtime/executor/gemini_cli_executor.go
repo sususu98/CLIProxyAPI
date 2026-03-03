@@ -79,11 +79,13 @@ func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	applyGeminiCLIHeaders(req, "unknown")
+	applyGeminiCLIHeaders(req, "unknown", e.cfg, auth)
 	return nil
 }
 
 // HttpRequest injects Gemini CLI credentials into the request and executes it.
+// It uses a whitelist approach: all incoming headers are stripped and only
+// the minimum set required by the Gemini CLI protocol is explicitly set.
 func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("gemini-cli executor: request is nil")
@@ -92,6 +94,20 @@ func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
+
+	// --- Whitelist: save only the headers we need from the original request ---
+	contentType := httpReq.Header.Get("Content-Type")
+
+	// Wipe ALL incoming headers to prevent client fingerprint leakage
+	for k := range httpReq.Header {
+		delete(httpReq.Header, k)
+	}
+
+	// --- Set only the headers Gemini CLI actually sends ---
+	if contentType != "" {
+		httpReq.Header.Set("Content-Type", contentType)
+	}
+
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
@@ -193,8 +209,7 @@ modelLoop:
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP, attemptModel)
-		reqHTTP.Header.Set("Accept", "application/json")
+		applyGeminiCLIHeaders(reqHTTP, attemptModel, e.cfg, auth)
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -361,8 +376,7 @@ modelLoop:
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP, attemptModel)
-		reqHTTP.Header.Set("Accept", "text/event-stream")
+		applyGeminiCLIHeaders(reqHTTP, attemptModel, e.cfg, auth)
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -564,8 +578,7 @@ modelLoop:
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP, baseModel)
-		reqHTTP.Header.Set("Accept", "application/json")
+		applyGeminiCLIHeaders(reqHTTP, baseModel, e.cfg, auth)
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -802,12 +815,39 @@ func stringValue(m map[string]any, key string) string {
 	return ""
 }
 
-// applyGeminiCLIHeaders sets required headers for the Gemini CLI upstream.
-// User-Agent is always forced to the GeminiCLI format regardless of the client's value,
-// so that upstream identifies the request as a native GeminiCLI client.
-func applyGeminiCLIHeaders(r *http.Request, model string) {
-	r.Header.Set("User-Agent", misc.GeminiCLIUserAgent(model))
-	r.Header.Set("X-Goog-Api-Client", misc.GeminiCLIApiClientHeader)
+// resolveGeminiCLIUserAgent resolves the User-Agent for Gemini CLI upstream requests.
+// Priority: auth attrs > auth metadata > config suffix > default (no suffix).
+func resolveGeminiCLIUserAgent(cfg *config.Config, auth *cliproxyauth.Auth, model string) string {
+	if auth != nil {
+		if auth.Attributes != nil {
+			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+				return ua
+			}
+		}
+		if auth.Metadata != nil {
+			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
+				return strings.TrimSpace(ua)
+			}
+		}
+	}
+	var suffix string
+	if cfg != nil {
+		suffix = cfg.GeminiCLIFingerprint.ResolveUASuffix()
+	}
+	return misc.GeminiCLIUserAgentWithSuffix(model, suffix)
+}
+
+// resolveGeminiCLIAPIClient resolves the X-Goog-Api-Client for Gemini CLI upstream requests.
+func resolveGeminiCLIAPIClient(cfg *config.Config) string {
+	if cfg != nil {
+		return cfg.GeminiCLIFingerprint.ResolveAPIClient(misc.GeminiCLIApiClientHeader)
+	}
+	return misc.GeminiCLIApiClientHeader
+}
+
+func applyGeminiCLIHeaders(r *http.Request, model string, cfg *config.Config, auth *cliproxyauth.Auth) {
+	r.Header.Set("User-Agent", resolveGeminiCLIUserAgent(cfg, auth, model))
+	r.Header.Set("X-Goog-Api-Client", resolveGeminiCLIAPIClient(cfg))
 }
 
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
@@ -969,7 +1009,7 @@ func FetchGeminiCLIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	applyGeminiCLIHeaders(httpReq, "unknown")
+	applyGeminiCLIHeaders(httpReq, "unknown", cfg, auth)
 	// 4. Execute
 	httpClient := newHTTPClient(ctx, cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)

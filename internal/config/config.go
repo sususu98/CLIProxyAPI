@@ -101,6 +101,8 @@ type Config struct {
 	// Per-auth user_agent attribute (in auth file metadata) takes precedence over these global defaults.
 	AntigravityUserAgents AntigravityUserAgents `yaml:"antigravity-user-agents" json:"antigravity-user-agents"`
 
+	GeminiCLIFingerprint GeminiCLIFingerprint `yaml:"gemini-cli-fingerprint" json:"gemini-cli-fingerprint"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -188,6 +190,39 @@ func (u AntigravityUserAgents) ResolveClientAgent() string {
 		return v
 	}
 	return DefaultAntigravityClientAgent
+}
+
+// GeminiCLIFingerprint configures User-Agent and X-Goog-Api-Client headers for Gemini CLI upstream requests.
+//
+// Resolution priority (highest to lowest):
+//  1. Per-auth user_agent attribute (auth file's "attributes.user_agent" field)
+//  2. Per-auth user_agent metadata (auth file's "metadata.user_agent" field)
+//  3. This config section (gemini-cli-fingerprint in config.yaml)
+//  4. Compiled default (GeminiCLIUserAgent function + GeminiCLIApiClientHeader constant)
+//
+// Hot-reloadable: changes take effect on config file save.
+type GeminiCLIFingerprint struct {
+	// UASuffix overrides the default UA suffix (GeminiCLIUASuffix).
+	// When empty, the compiled default "google-api-nodejs-client/10.5.0" is used.
+	UASuffix string `yaml:"ua-suffix" json:"ua-suffix"`
+
+	// APIClientOverride overrides the X-Goog-Api-Client header value.
+	// When empty, the compiled default "gl-node/22.19.0" is used.
+	APIClientOverride string `yaml:"api-client-override" json:"api-client-override"`
+}
+
+// ResolveUASuffix returns the configured UA suffix, or empty string if not set.
+func (f GeminiCLIFingerprint) ResolveUASuffix() string {
+	return strings.TrimSpace(f.UASuffix)
+}
+
+// ResolveAPIClient returns the effective X-Goog-Api-Client header value.
+// Priority: config override > compiled default constant.
+func (f GeminiCLIFingerprint) ResolveAPIClient(defaultValue string) string {
+	if v := strings.TrimSpace(f.APIClientOverride); v != "" {
+		return v
+	}
+	return defaultValue
 }
 
 // TLSConfig holds HTTPS server settings.

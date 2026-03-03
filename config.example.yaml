@@ -129,6 +129,20 @@ nonstream-keepalive-interval: 0
 #   api: "antigravity/1.19.6 darwin/arm64"                                       # UA for AI/code-assist requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels, loadCodeAssist)
 #   client: "antigravity/1.19.6 darwin/arm64 google-api-nodejs-client/10.3.0"    # UA for management/user-info requests (onboardUser, setUserSettings, fetchUserInfo)
 
+# Gemini CLI fingerprint configuration.
+# Controls the User-Agent and X-Goog-Api-Client headers sent to upstream Gemini CLI APIs.
+#
+# Resolution priority (highest to lowest):
+#   1. Per-auth user_agent attribute (auth file's "attributes.user_agent" field)
+#   2. Per-auth user_agent metadata (auth file's "metadata.user_agent" field)
+#   3. This config section (gemini-cli-fingerprint)
+#   4. Compiled default constants
+#
+# Hot-reloadable: changes take effect on config file save.
+# gemini-cli-fingerprint:
+#   ua-suffix: ""                    # Override default UA suffix (default: "google-api-nodejs-client/10.5.0")
+#   api-client-override: ""          # Override X-Goog-Api-Client header (default: "gl-node/22.19.0")
+
 
 # Gemini API keys
 # gemini-api-key:
