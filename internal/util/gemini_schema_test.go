@@ -102,6 +102,33 @@ func TestCleanJSONSchemaForAntigravity_ConstraintsToDescription(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_UniqueItemsRemoved(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"update_fields": {
+				"description": "Fields to update",
+				"items": {
+					"enum": ["name", "owner"],
+					"type": "string"
+				},
+				"type": "array",
+				"uniqueItems": true
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// uniqueItems should be REMOVED and moved to description
+	if strings.Contains(result, `"uniqueItems"`) {
+		t.Errorf("uniqueItems keyword should be removed, got: %s", result)
+	}
+	if !strings.Contains(result, "uniqueItems: true") {
+		t.Errorf("uniqueItems hint missing in description, got: %s", result)
+	}
+}
+
 func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_SmartSelection(t *testing.T) {
 	input := `{
 		"type": "object",
