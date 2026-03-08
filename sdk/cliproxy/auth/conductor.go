@@ -414,16 +414,25 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+	return m.resolveModelPool(auth, requestedModel)
+}
+
+// resolveModelPool resolves the upstream model pool for the given pre-resolved
+// upstream model. It checks for openai-compat pool rotation first, then falls
+// back to API key alias resolution. This is the second half of
+// prepareExecutionModels, separated so callers with a pre-resolved model
+// (e.g. from thinking-aware alias resolution) can skip the OAuth alias step.
+func (m *Manager) resolveModelPool(auth *Auth, upstreamModel string) []string {
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
 		return rotateStrings(pool, offset)
 	}
-	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
+	resolved := m.applyAPIKeyModelAlias(auth, upstreamModel)
 	if strings.TrimSpace(resolved) == "" {
-		resolved = requestedModel
+		resolved = upstreamModel
 	}
 	return []string{resolved}
 }
@@ -519,11 +528,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, upstreamModel string) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	execModels := m.prepareExecutionModels(auth, routeModel)
+	var execModels []string
+	if upstreamModel != "" {
+		execModels = m.resolveModelPool(auth, upstreamModel)
+	} else {
+		execModels = m.prepareExecutionModels(auth, routeModel)
+	}
 	var lastErr error
 	for idx, execModel := range execModels {
 		execReq := req
@@ -1243,7 +1257,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		fb.Capture(aliasResult)
 
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, aliasResult.UpstreamModel)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
