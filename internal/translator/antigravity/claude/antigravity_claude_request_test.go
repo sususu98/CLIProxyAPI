@@ -1753,7 +1753,7 @@ func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_EffortLevels(t *test
 		{"low", "low", "low"},
 		{"medium", "medium", "medium"},
 		{"high", "high", "high"},
-		{"max", "max", "high"},
+		{"max", "max", "max"},
 	}
 
 	for _, tt := range tests {
