@@ -276,6 +276,9 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		"email": tokenStorage.Email,
 	}
 	attrs := make(map[string]string)
+	// Store plan in login-time auth attributes for immediate callers.
+	// Note: the synthesizer re-derives plan from JWT on disk reload,
+	// so this is only meaningful during the login session itself.
 	if planType != "" {
 		attrs["plan"] = planType
 	}

@@ -189,12 +189,12 @@ func resolveCodexPlan(metadata map[string]any, filePath string) string {
 
 // inferPlanFromFilename extracts plan type from Codex auth filename conventions.
 // Filenames follow the pattern: codex-{email}-{plan}.json
-// Known plan suffixes: -plus, -team, -pro. No suffix implies free/unknown.
+// Known plan suffixes: -free, -plus, -team, -pro. No suffix implies unknown.
 func inferPlanFromFilename(filePath string) string {
 	base := strings.ToLower(filepath.Base(filePath))
 	base = strings.TrimSuffix(base, ".json")
 	// Known plan type suffixes in Codex credential filenames.
-	knownPlans := []string{"plus", "team", "pro"}
+	knownPlans := []string{"free", "plus", "team", "pro"}
 	for _, plan := range knownPlans {
 		if strings.HasSuffix(base, "-"+plan) {
 			return plan

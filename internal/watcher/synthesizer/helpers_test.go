@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
@@ -534,7 +535,7 @@ func TestInferPlanFromFilename(t *testing.T) {
 		{"/auths/codex-user@test.com-team.json", "team"},
 		{"/auths/codex-user@test.com-pro.json", "pro"},
 		{"/auths/codex-user@test.com.json", ""},
-		{"/auths/codex-user@test.com-free.json", ""},  // free is not a recognized suffix
+		{"/auths/codex-user@test.com-free.json", "free"},
 		{"", ""},
 	}
 
@@ -545,5 +546,101 @@ func TestInferPlanFromFilename(t *testing.T) {
 				t.Errorf("inferPlanFromFilename(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_HappyPath_FreePlanExcluded(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Metadata:   map[string]any{},
+		Attributes: map[string]string{},
+	}
+	// Use filename with -free suffix to infer plan type via fallback.
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-user@test.com-free.json")
+
+	wantExcluded := "gpt-5.3-codex,gpt-5.4"
+	if got := auth.Attributes["excluded_models"]; got != wantExcluded {
+		t.Errorf("excluded_models = %q, want %q", got, wantExcluded)
+	}
+	if got := auth.Attributes["plan"]; got != "free" {
+		t.Errorf("plan = %q, want %q", got, "free")
+	}
+	if _, ok := auth.Attributes["excluded_models_hash"]; !ok {
+		t.Error("expected excluded_models_hash to be set")
+	}
+}
+
+func TestApplyOAuthPlanAccess_JWTPlanResolution(t *testing.T) {
+	// Build a mock JWT with chatgpt_plan_type = "free".
+	// JWT format: header.payload.signature (no signature verification).
+	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	payload := `{"email":"user@test.com","https://api.openai.com/auth":{"chatgpt_plan_type":"free","chatgpt_account_id":"acc123"}}`
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	mockJWT := headerB64 + "." + payloadB64 + ".fake-signature"
+
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"id_token": mockJWT,
+		},
+		Attributes: map[string]string{},
+	}
+	// Filename has -plus suffix, but JWT takes priority with "free".
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-user@test.com-plus.json")
+
+	wantExcluded := "gpt-5.3-codex,gpt-5.4"
+	if got := auth.Attributes["excluded_models"]; got != wantExcluded {
+		t.Errorf("excluded_models = %q, want %q", got, wantExcluded)
+	}
+	if got := auth.Attributes["plan"]; got != "free" {
+		t.Errorf("plan = %q, want %q (JWT should override filename)", got, "free")
+	}
+}
+
+func TestApplyOAuthPlanAccess_JWTPlusPlan_NoExclusion(t *testing.T) {
+	// JWT says "plus" — should NOT be excluded by denied-plans=["free"].
+	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	payload := `{"email":"user@test.com","https://api.openai.com/auth":{"chatgpt_plan_type":"plus"}}`
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	mockJWT := headerB64 + "." + payloadB64 + ".fake-signature"
+
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"id_token": mockJWT,
+		},
+		Attributes: map[string]string{},
+	}
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-user@test.com-plus.json")
+
+	if got := auth.Attributes["excluded_models"]; got != "" {
+		t.Errorf("expected no excluded_models for plus plan, got %q", got)
+	}
+	if got := auth.Attributes["plan"]; got != "plus" {
+		t.Errorf("plan = %q, want %q", got, "plus")
 	}
 }
