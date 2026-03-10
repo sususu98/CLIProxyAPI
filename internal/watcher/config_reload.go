@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -121,6 +122,7 @@ func (w *Watcher) reloadConfig() bool {
 				merged = append(merged, p)
 			}
 			affectedOAuthProviders = merged
+			sort.Strings(affectedOAuthProviders)
 		}
 	}
 

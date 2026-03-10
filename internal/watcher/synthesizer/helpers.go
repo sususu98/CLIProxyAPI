@@ -218,13 +218,17 @@ func shouldExcludeByPlan(plan string, rule config.ModelPlanAccess) bool {
 		}
 		return false
 	}
-	// Whitelist mode (default): exclude if plan is NOT in the allowed list.
-	for _, allowed := range rule.AllowedPlans {
-		if plan == allowed {
-			return false
+	if len(rule.AllowedPlans) > 0 {
+		// Whitelist mode: exclude if plan is NOT in the allowed list.
+		for _, allowed := range rule.AllowedPlans {
+			if plan == allowed {
+				return false
+			}
 		}
+		return true
 	}
-	return true
+	// Both lists empty — no-op rule, do not exclude.
+	return false
 }
 
 // mergeIntoExcludedModels adds new patterns to the auth's excluded_models attribute

@@ -310,10 +310,10 @@ func TestShouldExcludeByPlan(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "allowed: empty list excludes all",
+			name: "allowed: empty list is no-op",
 			plan: "plus",
 			rule: config.ModelPlanAccess{AllowedPlans: []string{}},
-			want: true,
+			want: false, // empty AllowedPlans = no-op rule (same as both empty)
 		},
 		// --- denied-plans (blacklist) ---
 		{
@@ -338,7 +338,27 @@ func TestShouldExcludeByPlan(t *testing.T) {
 			name: "denied: empty list excludes none",
 			plan: "free",
 			rule: config.ModelPlanAccess{DeniedPlans: []string{}},
-			want: true, // falls through to allowed-plans path with empty list
+			want: false, // empty DeniedPlans with nil AllowedPlans = no-op rule
+		},
+		// --- both empty (no-op) ---
+		{
+			name: "both empty: no exclusion",
+			plan: "free",
+			rule: config.ModelPlanAccess{},
+			want: false,
+		},
+		// --- unknown plan semantics ---
+		{
+			name: "denied: unknown plan enterprise allowed through",
+			plan: "enterprise",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: false,
+		},
+		{
+			name: "allowed: unknown plan enterprise excluded",
+			plan: "enterprise",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{"plus", "team"}},
+			want: true,
 		},
 	}
 
