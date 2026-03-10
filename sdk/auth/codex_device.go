@@ -281,6 +281,7 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	// so this is only meaningful during the login session itself.
 	if planType != "" {
 		attrs["plan"] = planType
+		attrs["plan_type"] = planType
 	}
 
 	fmt.Println("Codex authentication successful")

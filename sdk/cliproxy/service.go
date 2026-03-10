@@ -808,12 +808,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		models = executor.FetchGeminiCLIModels(ctx, a, s.cfg)
-		cancel()
-		if len(models) == 0 {
-			models = registry.GetGeminiCLIModels()
-		}
+		models = registry.GetGeminiCLIModels()
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
@@ -835,7 +830,22 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		models = registry.GetOpenAIModels()
+		codexPlanType := ""
+		if a.Attributes != nil {
+			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
+		}
+		switch strings.ToLower(codexPlanType) {
+		case "pro":
+			models = registry.GetCodexProModels()
+		case "plus":
+			models = registry.GetCodexPlusModels()
+		case "team":
+			models = registry.GetCodexTeamModels()
+		case "free":
+			models = registry.GetCodexFreeModels()
+		default:
+			models = registry.GetCodexProModels()
+		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)

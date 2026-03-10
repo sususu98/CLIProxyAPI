@@ -143,6 +143,7 @@ func ApplyOAuthPlanAccess(auth *coreauth.Auth, cfg *config.Config, filePath stri
 		auth.Attributes = make(map[string]string)
 	}
 	auth.Attributes["plan"] = plan
+	auth.Attributes["plan_type"] = plan
 
 	// Collect patterns that this plan is NOT allowed to access.
 	var planExcluded []string
