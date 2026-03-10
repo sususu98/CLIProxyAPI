@@ -284,7 +284,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	hasUpstreamAPICall := upstreamAttemptCount > 0
 	hasRetryAttempts := upstreamAttemptCount > 1
 
-	forceLog := w.logOnErrorOnly && ((hasAPIError && hasUpstreamAPICall) || hasRetryAttempts) && !w.logger.IsEnabled()
+	forceLog := w.logOnErrorOnly && hasAPIError && hasUpstreamAPICall && !w.logger.IsEnabled()
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
