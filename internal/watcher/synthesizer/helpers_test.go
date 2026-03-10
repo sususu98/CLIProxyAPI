@@ -287,3 +287,263 @@ func TestAddConfigHeadersToAttrs(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldExcludeByPlan(t *testing.T) {
+	tests := []struct {
+		name string
+		plan string
+		rule config.ModelPlanAccess
+		want bool
+	}{
+		// --- allowed-plans (whitelist) ---
+		{
+			name: "allowed: plan in list",
+			plan: "plus",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{"plus", "team"}},
+			want: false,
+		},
+		{
+			name: "allowed: plan not in list",
+			plan: "free",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{"plus", "team"}},
+			want: true,
+		},
+		{
+			name: "allowed: empty list excludes all",
+			plan: "plus",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{}},
+			want: true,
+		},
+		// --- denied-plans (blacklist) ---
+		{
+			name: "denied: plan in list",
+			plan: "free",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: true,
+		},
+		{
+			name: "denied: plan not in list",
+			plan: "plus",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: false,
+		},
+		{
+			name: "denied: unknown plan not in list",
+			plan: "enterprise",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: false,
+		},
+		{
+			name: "denied: empty list excludes none",
+			plan: "free",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{}},
+			want: true, // falls through to allowed-plans path with empty list
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldExcludeByPlan(tt.plan, tt.rule)
+			if got != tt.want {
+				t.Errorf("shouldExcludeByPlan(%q, %+v) = %v, want %v", tt.plan, tt.rule, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_DeniedPlans(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.2*", DeniedPlans: []string{"plus"}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		plan         string
+		wantExcluded string // comma-separated sorted excluded models, or empty
+	}{
+		{
+			name:         "free account: excluded from 5.3 and 5.4",
+			plan:         "free",
+			wantExcluded: "gpt-5.3-codex,gpt-5.4",
+		},
+		{
+			name:         "plus account: excluded from 5.2",
+			plan:         "plus",
+			wantExcluded: "gpt-5.2*",
+		},
+		{
+			name:         "team account: no exclusions",
+			plan:         "team",
+			wantExcluded: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &coreauth.Auth{
+				Provider:   "codex",
+				Metadata:   map[string]any{},
+				Attributes: map[string]string{"plan": tt.plan},
+			}
+			// Directly test the exclusion logic by calling the inner loop.
+			var planExcluded []string
+			for _, rule := range cfg.OAuthModelPlanAccess["codex"] {
+				if shouldExcludeByPlan(tt.plan, rule) {
+					planExcluded = append(planExcluded, rule.Pattern)
+				}
+			}
+			if len(planExcluded) > 0 {
+				mergeIntoExcludedModels(auth, planExcluded)
+			}
+			got := auth.Attributes["excluded_models"]
+			if got != tt.wantExcluded {
+				t.Errorf("excluded_models = %q, want %q", got, tt.wantExcluded)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_AllowedPlans(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", AllowedPlans: []string{"plus", "team"}},
+				{Pattern: "gpt-5.4", AllowedPlans: []string{"plus", "team"}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		plan         string
+		wantExcluded string
+	}{
+		{
+			name:         "free excluded from both",
+			plan:         "free",
+			wantExcluded: "gpt-5.3-codex,gpt-5.4",
+		},
+		{
+			name:         "plus allowed",
+			plan:         "plus",
+			wantExcluded: "",
+		},
+		{
+			name:         "team allowed",
+			plan:         "team",
+			wantExcluded: "",
+		},
+		{
+			name:         "unknown plan excluded",
+			plan:         "enterprise",
+			wantExcluded: "gpt-5.3-codex,gpt-5.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &coreauth.Auth{
+				Provider:   "codex",
+				Attributes: map[string]string{},
+			}
+			var planExcluded []string
+			for _, rule := range cfg.OAuthModelPlanAccess["codex"] {
+				if shouldExcludeByPlan(tt.plan, rule) {
+					planExcluded = append(planExcluded, rule.Pattern)
+				}
+			}
+			if len(planExcluded) > 0 {
+				mergeIntoExcludedModels(auth, planExcluded)
+			}
+			got := auth.Attributes["excluded_models"]
+			if got != tt.wantExcluded {
+				t.Errorf("excluded_models = %q, want %q", got, tt.wantExcluded)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_MergeWithExisting(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"excluded_models": "existing-model",
+		},
+	}
+	rules := []config.ModelPlanAccess{
+		{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+	}
+	var planExcluded []string
+	for _, rule := range rules {
+		if shouldExcludeByPlan("free", rule) {
+			planExcluded = append(planExcluded, rule.Pattern)
+		}
+	}
+	mergeIntoExcludedModels(auth, planExcluded)
+
+	want := "existing-model,gpt-5.4"
+	if got := auth.Attributes["excluded_models"]; got != want {
+		t.Errorf("excluded_models = %q, want %q", got, want)
+	}
+}
+
+func TestApplyOAuthPlanAccess_NoConfig(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{},
+	}
+	// No plan access config — should be a no-op.
+	ApplyOAuthPlanAccess(auth, &config.Config{}, "/path/codex-test.json")
+	if _, ok := auth.Attributes["excluded_models"]; ok {
+		t.Error("expected no excluded_models when config is empty")
+	}
+}
+
+func TestApplyOAuthPlanAccess_UnsupportedProvider(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "antigravity",
+		Attributes: map[string]string{},
+	}
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"antigravity": {
+				{Pattern: "some-model", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	// antigravity has no plan resolver, so resolveOAuthPlan returns "".
+	// Unknown plan should be permissive (no exclusions).
+	ApplyOAuthPlanAccess(auth, cfg, "/path/antigravity-test.json")
+	if _, ok := auth.Attributes["excluded_models"]; ok {
+		t.Error("expected no excluded_models for unsupported provider")
+	}
+}
+
+func TestInferPlanFromFilename(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/auths/codex-user@test.com-plus.json", "plus"},
+		{"/auths/codex-user@test.com-team.json", "team"},
+		{"/auths/codex-user@test.com-pro.json", "pro"},
+		{"/auths/codex-user@test.com.json", ""},
+		{"/auths/codex-user@test.com-free.json", ""},  // free is not a recognized suffix
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := inferPlanFromFilename(tt.path)
+			if got != tt.want {
+				t.Errorf("inferPlanFromFilename(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}

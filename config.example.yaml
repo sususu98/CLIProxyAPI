@@ -405,6 +405,28 @@ oauth-model-alias:
 #   kimi:
 #     - "kimi-k2-thinking"
 
+# OAuth provider model plan-based access control.
+# Restricts model access based on account plan type (e.g., free, plus, team).
+# Plan type is resolved from JWT id_token claims (primary) or filename suffix (fallback).
+# Each rule uses either allowed-plans (whitelist) or denied-plans (blacklist), not both.
+#
+# denied-plans (recommended): accounts whose plan IS in the list are excluded.
+#   Safer default — unknown plan types are allowed through.
+#
+# allowed-plans: accounts whose plan is NOT in the list are excluded.
+#   Stricter — only explicitly listed plans can access the model.
+#
+# oauth-model-plan-access:
+#   codex:
+#     - pattern: "gpt-5.3-codex"
+#       denied-plans: ["free"]           # free accounts cannot access this model
+#     - pattern: "gpt-5.4*"             # wildcard matching
+#       denied-plans: ["free"]
+#     - pattern: "gpt-5.2*"
+#       denied-plans: ["plus"]           # reserve for free accounts, save plus quota
+#     # Alternatively, use allowed-plans for strict whitelist:
+#     # - pattern: "gpt-5.4*"
+#     #   allowed-plans: ["plus", "team"]  # only these plans can access
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.
