@@ -62,14 +62,8 @@ func (fc *fallbackController) ApplyModel(execReq *cliproxyexecutor.Request) {
 	}
 }
 
-// PostProcessResponse applies response post-processing (StripThinking, ForceMapping).
-// When fallback is active, uses the original alias's post-processing config
-// so the client sees consistent model names and response format.
 func (fc *fallbackController) PostProcessResponse(resp *cliproxyexecutor.Response, currentAlias OAuthModelAliasResult) {
 	effective := fc.effectiveAlias(currentAlias)
-	if effective.StripThinkingResponse {
-		resp.Payload = stripThinkingBlocksFromResponse(resp.Payload)
-	}
 	if effective.ForceMapping && effective.OriginalAlias != "" {
 		resp.Payload = rewriteModelInResponse(resp.Payload, effective.OriginalAlias)
 	}

@@ -441,7 +441,7 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string
 // upstream model. It checks for openai-compat pool rotation first, then falls
 // back to API key alias resolution. This is the second half of
 // prepareExecutionModels, separated so callers with a pre-resolved model
-// (e.g. from thinking-aware alias resolution) can skip the OAuth alias step.
+// (e.g. from pre-resolved alias resolution) can skip the OAuth alias step.
 func (m *Manager) resolveModelPool(auth *Auth, upstreamModel string) []string {
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
 		if len(pool) == 1 {
@@ -1045,8 +1045,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
-		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
 		execReq.Model = aliasResult.UpstreamModel
 
 		// Resolve model pool for openai-compat providers; single model for OAuth providers.
@@ -1160,8 +1159,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
-		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
 		execReq.Model = aliasResult.UpstreamModel
 
 		var models []string
@@ -1272,8 +1270,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
-		aliasResult := m.applyOAuthModelAliasWithThinking(auth, rewriteModelForAuth(routeModel, auth), thinkingEnabled)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, rewriteModelForAuth(routeModel, auth))
 
 		fb.Capture(aliasResult)
 
@@ -1289,13 +1286,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		effectiveAlias := fb.EffectiveAlias(aliasResult)
-		stripThinking := effectiveAlias.StripThinkingResponse
 		rewriteModel := ""
 		if effectiveAlias.ForceMapping && effectiveAlias.OriginalAlias != "" {
 			rewriteModel = effectiveAlias.OriginalAlias
 		}
-		if stripThinking || rewriteModel != "" {
-			rewriter := NewStreamRewriter(StreamRewriteOptions{StripThinking: stripThinking, RewriteModel: rewriteModel})
+		if rewriteModel != "" {
+			rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: rewriteModel})
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(src <-chan cliproxyexecutor.StreamChunk) {
 				defer close(out)
@@ -1423,8 +1419,7 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
-		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 
@@ -1487,8 +1482,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
-		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 
@@ -1552,8 +1546,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		thinkingEnabled := isThinkingEnabledInPayload(req.Payload, opts.SourceFormat)
-		aliasResult := m.applyOAuthModelAliasWithThinking(auth, execReq.Model, thinkingEnabled)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
 		execReq.Model = aliasResult.UpstreamModel
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 
@@ -1575,17 +1568,16 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
 		effectiveAlias := fb.EffectiveAlias(aliasResult)
-		stripThinking := effectiveAlias.StripThinkingResponse
 		rewriteModel := ""
 		if effectiveAlias.ForceMapping && effectiveAlias.OriginalAlias != "" {
 			rewriteModel = effectiveAlias.OriginalAlias
 		}
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, doStripThinking bool, modelToRewrite string) {
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, modelToRewrite string) {
 			defer close(out)
 			var failed bool
 			var rewriter *StreamRewriter
-			if doStripThinking || modelToRewrite != "" {
-				rewriter = NewStreamRewriter(StreamRewriteOptions{StripThinking: doStripThinking, RewriteModel: modelToRewrite})
+			if modelToRewrite != "" {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: modelToRewrite})
 			}
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
@@ -1607,7 +1599,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, streamResult.Chunks, stripThinking, rewriteModel)
+		}(execCtx, auth.Clone(), provider, streamResult.Chunks, rewriteModel)
 		return &cliproxyexecutor.StreamResult{
 			Headers: streamResult.Headers,
 			Chunks:  out,

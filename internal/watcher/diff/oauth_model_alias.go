@@ -86,15 +86,6 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		if alias.ForceMapping {
 			key += "|force-mapping"
 		}
-		if alias.ToThinking != "" {
-			key += "|to-thinking:" + strings.ToLower(strings.TrimSpace(alias.ToThinking))
-		}
-		if alias.ToNonThinking != "" {
-			key += "|to-non-thinking:" + strings.ToLower(strings.TrimSpace(alias.ToNonThinking))
-		}
-		if alias.StripThinkingResponse {
-			key += "|strip-thinking"
-		}
 		if _, exists := seen[key]; exists {
 			continue
 		}

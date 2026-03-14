@@ -315,12 +315,6 @@ type RoutingConfig struct {
 // When ForceMapping is true, responses will have the model name rewritten to match
 // the alias instead of showing the upstream model name.
 //
-// Thinking-aware mapping fields allow routing to different models based on whether
-// the request has thinking enabled:
-//   - ToThinking: target for requests with thinking.type=enabled
-//   - ToNonThinking: target for requests without thinking enabled
-//   - StripThinkingResponse: remove thinking blocks from response
-//
 // FallbackModel specifies an alternative upstream model to try when the primary
 // model returns a capacity-exhausted error (503). This enables transparent model
 // fallback without changing the client-visible model name.
@@ -330,10 +324,6 @@ type OAuthModelAlias struct {
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
-
-	ToThinking            string `yaml:"to-thinking,omitempty" json:"to-thinking,omitempty"`
-	ToNonThinking         string `yaml:"to-non-thinking,omitempty" json:"to-non-thinking,omitempty"`
-	StripThinkingResponse bool   `yaml:"strip-thinking-response,omitempty" json:"strip-thinking-response,omitempty"`
 
 	FallbackModel string `yaml:"fallback-model,omitempty" json:"fallback-model,omitempty"`
 }
@@ -936,17 +926,12 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
-			toThinking := strings.TrimSpace(entry.ToThinking)
-			toNonThinking := strings.TrimSpace(entry.ToNonThinking)
 			clean = append(clean, OAuthModelAlias{
-				Name:                  name,
-				Alias:                 alias,
-				Fork:                  entry.Fork,
-				ForceMapping:          entry.ForceMapping,
-				ToThinking:            toThinking,
-				ToNonThinking:         toNonThinking,
-				StripThinkingResponse: entry.StripThinkingResponse,
-				FallbackModel:         strings.TrimSpace(entry.FallbackModel),
+				Name:          name,
+				Alias:         alias,
+				Fork:          entry.Fork,
+				ForceMapping:  entry.ForceMapping,
+				FallbackModel: strings.TrimSpace(entry.FallbackModel),
 			})
 		}
 		if len(clean) > 0 {

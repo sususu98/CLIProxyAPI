@@ -26,26 +26,23 @@ func rewriteModelInResponse(data []byte, targetModel string) []byte {
 }
 
 type StreamRewriteOptions struct {
-	RewriteModel  string
-	StripThinking bool
+	RewriteModel string
 }
 
 type StreamRewriter struct {
-	options              StreamRewriteOptions
-	thinkingBlockIndexes map[int]bool
-	pendingBuf           []byte
+	options    StreamRewriteOptions
+	pendingBuf []byte
 }
 
 func NewStreamRewriter(options StreamRewriteOptions) *StreamRewriter {
 	return &StreamRewriter{
-		options:              options,
-		thinkingBlockIndexes: make(map[int]bool),
-		pendingBuf:           nil,
+		options:    options,
+		pendingBuf: nil,
 	}
 }
 
 func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
-	if r.options.RewriteModel == "" && !r.options.StripThinking {
+	if r.options.RewriteModel == "" {
 		return chunk
 	}
 
@@ -62,9 +59,6 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	trimmed := bytes.TrimSpace(chunk)
 	if len(trimmed) > 0 && trimmed[0] == '{' && gjson.ValidBytes(trimmed) {
 		rewritten := trimmed
-		if r.options.StripThinking {
-			rewritten = stripThinkingBlocksFromResponse(rewritten)
-		}
 		if r.options.RewriteModel != "" {
 			rewritten = rewriteModelInResponse(rewritten, r.options.RewriteModel)
 		}
@@ -127,12 +121,6 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 				continue
 			}
 
-			if r.options.StripThinking && r.isThinkingEvent(jsonData) {
-				pendingEvent = nil
-				skipBlanks = true
-				continue
-			}
-
 			if pendingEvent != nil {
 				result = append(result, pendingEvent)
 				pendingEvent = nil
@@ -168,72 +156,4 @@ func extractLastDataPayload(chunk []byte) []byte {
 		}
 	}
 	return nil
-}
-
-func (r *StreamRewriter) isThinkingEvent(data []byte) bool {
-	eventType := gjson.GetBytes(data, "type").String()
-
-	switch eventType {
-	case "content_block_start":
-		blockType := gjson.GetBytes(data, "content_block.type").String()
-		if blockType == "thinking" {
-			index := int(gjson.GetBytes(data, "index").Int())
-			r.thinkingBlockIndexes[index] = true
-			log.Debugf("response rewriter: stripping thinking block start at index %d", index)
-			return true
-		}
-		return false
-
-	case "content_block_delta":
-		index := int(gjson.GetBytes(data, "index").Int())
-		if r.thinkingBlockIndexes[index] {
-			return true
-		}
-		deltaType := gjson.GetBytes(data, "delta.type").String()
-		return deltaType == "thinking_delta"
-
-	case "content_block_stop":
-		index := int(gjson.GetBytes(data, "index").Int())
-		if r.thinkingBlockIndexes[index] {
-			delete(r.thinkingBlockIndexes, index)
-			log.Debugf("response rewriter: stripping thinking block stop at index %d", index)
-			return true
-		}
-		return false
-	}
-
-	return false
-}
-
-func stripThinkingBlocksFromResponse(data []byte) []byte {
-	if len(data) == 0 {
-		return data
-	}
-
-	contentResult := gjson.GetBytes(data, "content")
-	if !contentResult.Exists() || !contentResult.IsArray() {
-		return data
-	}
-
-	var filteredContent []any
-	var strippedCount int
-	contentResult.ForEach(func(_, value gjson.Result) bool {
-		blockType := value.Get("type").String()
-		if blockType != "thinking" {
-			filteredContent = append(filteredContent, value.Value())
-		} else {
-			strippedCount++
-		}
-		return true
-	})
-
-	if strippedCount > 0 {
-		log.Debugf("response rewriter: stripped %d thinking blocks from non-streaming response", strippedCount)
-	}
-
-	result, err := sjson.SetBytes(data, "content", filteredContent)
-	if err != nil {
-		return data
-	}
-	return result
 }
