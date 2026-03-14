@@ -7,11 +7,20 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
+
+const (
+	// subscriptionExpirySkew is a small time buffer to account for clock differences
+	// and token refresh delays when checking subscription expiry.
+	subscriptionExpirySkew = 1 * time.Hour
 )
 
 // StableIDGenerator generates stable, deterministic IDs for auth entries.
@@ -171,26 +180,61 @@ func resolveOAuthPlan(provider string, metadata map[string]any, filePath string)
 	}
 }
 
-// resolveCodexPlan extracts the Codex account plan type.
-// Primary source: JWT id_token claim (chatgpt_plan_type).
-// Fallback: filename suffix inference (-plus, -team, -pro).
 func resolveCodexPlan(metadata map[string]any, filePath string) string {
-	// Primary: parse JWT id_token for plan type.
 	if idToken, ok := metadata["id_token"].(string); ok && idToken != "" {
 		if claims, err := codex.ParseJWTToken(idToken); err == nil && claims != nil {
 			if plan := strings.ToLower(strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)); plan != "" {
+				if isPaidPlan(plan) {
+					if expiry, ok := parseSubscriptionActiveUntil(claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil); ok {
+						if time.Now().After(expiry.Add(subscriptionExpirySkew)) {
+							log.Infof("codex plan downgrade: %s JWT claims plan=%q but subscription expired %s, treating as free",
+								claims.Email, plan, expiry.Format(time.RFC3339))
+							return "free"
+						}
+					}
+				}
 				return plan
 			}
 		}
 	}
-
-	// Fallback: infer plan from filename suffix.
 	return inferPlanFromFilename(filePath)
 }
 
-// inferPlanFromFilename extracts plan type from Codex auth filename conventions.
-// Filenames follow the pattern: codex-{email}-{plan}.json
-// Known plan suffixes: -free, -plus, -team, -pro. No suffix implies unknown.
+func isPaidPlan(plan string) bool {
+	switch plan {
+	case "plus", "team", "pro":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseSubscriptionActiveUntil(v any) (time.Time, bool) {
+	switch val := v.(type) {
+	case string:
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"} {
+			if t, err := time.Parse(layout, val); err == nil {
+				return t.UTC(), true
+			}
+		}
+		return time.Time{}, false
+	case float64:
+		if val <= 0 {
+			return time.Time{}, false
+		}
+		if val > 1e11 {
+			return time.Unix(int64(val/1000), 0).UTC(), true
+		}
+		return time.Unix(int64(val), 0).UTC(), true
+	default:
+		return time.Time{}, false
+	}
+}
+
 func inferPlanFromFilename(filePath string) string {
 	base := strings.ToLower(filepath.Base(filePath))
 	base = strings.TrimSuffix(base, ".json")

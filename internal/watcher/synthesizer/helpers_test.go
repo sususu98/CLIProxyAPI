@@ -2,9 +2,11 @@ package synthesizer
 
 import (
 	"encoding/base64"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
@@ -662,5 +664,221 @@ func TestApplyOAuthPlanAccess_JWTPlusPlan_NoExclusion(t *testing.T) {
 	}
 	if got := auth.Attributes["plan"]; got != "plus" {
 		t.Errorf("plan = %q, want %q", got, "plus")
+	}
+}
+
+func TestIsPaidPlan(t *testing.T) {
+	tests := []struct {
+		plan string
+		want bool
+	}{
+		{"plus", true},
+		{"team", true},
+		{"pro", true},
+		{"free", false},
+		{"enterprise", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.plan, func(t *testing.T) {
+			if got := isPaidPlan(tt.plan); got != tt.want {
+				t.Errorf("isPaidPlan(%q) = %v, want %v", tt.plan, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSubscriptionActiveUntil(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  any
+		wantOK bool
+		check  func(t *testing.T, got time.Time)
+	}{
+		{"nil", nil, false, nil},
+		{"empty string", "", false, nil},
+		{"whitespace string", "  ", false, nil},
+		{"garbage string", "not-a-date", false, nil},
+		{"negative float", float64(-1), false, nil},
+		{"zero float", float64(0), false, nil},
+		{"bool type", true, false, nil},
+		{
+			"RFC3339 string",
+			"2026-02-14T00:00:00Z",
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC)
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"ISO 8601 without timezone",
+			"2026-02-14T12:30:00",
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Date(2026, 2, 14, 12, 30, 0, 0, time.UTC)
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"date-only string",
+			"2026-02-14",
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC)
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"unix seconds",
+			float64(1771027200), // 2026-02-14T12:00:00Z
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Unix(1771027200, 0).UTC()
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"unix milliseconds",
+			float64(1771027200000), // same moment in ms
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Unix(1771027200, 0).UTC()
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseSubscriptionActiveUntil(tt.input)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if tt.check != nil {
+				tt.check(t, got)
+			}
+		})
+	}
+}
+
+func buildMockJWT(planType string, activeUntil any) string {
+	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	activeUntilJSON := "null"
+	switch v := activeUntil.(type) {
+	case string:
+		activeUntilJSON = fmt.Sprintf("%q", v)
+	case float64:
+		activeUntilJSON = fmt.Sprintf("%v", v)
+	case int:
+		activeUntilJSON = fmt.Sprintf("%d", v)
+	}
+	payload := fmt.Sprintf(
+		`{"email":"test@example.com","https://api.openai.com/auth":{"chatgpt_plan_type":"%s","chatgpt_account_id":"acc123","chatgpt_subscription_active_until":%s}}`,
+		planType, activeUntilJSON,
+	)
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return headerB64 + "." + payloadB64 + ".fake-signature"
+}
+
+func TestResolveCodexPlan_SubscriptionExpiry(t *testing.T) {
+	tests := []struct {
+		name        string
+		planType    string
+		activeUntil any
+		wantPlan    string
+	}{
+		{
+			name:        "plus with active subscription",
+			planType:    "plus",
+			activeUntil: time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+			wantPlan:    "plus",
+		},
+		{
+			name:        "plus with expired subscription",
+			planType:    "plus",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "plus with nil active_until (no downgrade)",
+			planType:    "plus",
+			activeUntil: nil,
+			wantPlan:    "plus",
+		},
+		{
+			name:        "team with expired subscription",
+			planType:    "team",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "pro with expired subscription",
+			planType:    "pro",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "free plan skips expiry check",
+			planType:    "free",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "plus with expired unix timestamp",
+			planType:    "plus",
+			activeUntil: float64(1704067200), // 2024-01-01T00:00:00Z
+			wantPlan:    "free",
+		},
+		{
+			name:        "plus recently expired within skew (no downgrade)",
+			planType:    "plus",
+			activeUntil: time.Now().Add(-30 * time.Minute).Format(time.RFC3339),
+			wantPlan:    "plus",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockJWT := buildMockJWT(tt.planType, tt.activeUntil)
+			metadata := map[string]any{"id_token": mockJWT}
+			got := resolveCodexPlan(metadata, "/auths/codex-test@example.com.json")
+			if got != tt.wantPlan {
+				t.Errorf("resolveCodexPlan() = %q, want %q", got, tt.wantPlan)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_ExpiredPlusDeniedAsFreePlan(t *testing.T) {
+	expiredJWT := buildMockJWT("plus", "2025-01-01T00:00:00Z")
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.4*", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Metadata:   map[string]any{"id_token": expiredJWT},
+		Attributes: map[string]string{},
+	}
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-test@example.com-plus.json")
+
+	if got := auth.Attributes["plan"]; got != "free" {
+		t.Errorf("plan = %q, want %q (expired plus should be downgraded)", got, "free")
+	}
+	wantExcluded := "gpt-5.4*"
+	if got := auth.Attributes["excluded_models"]; got != wantExcluded {
+		t.Errorf("excluded_models = %q, want %q", got, wantExcluded)
 	}
 }
