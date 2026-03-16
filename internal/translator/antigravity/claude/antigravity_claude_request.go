@@ -73,6 +73,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	contentsJSON := "[]"
 	hasContents := false
 
+	// tool_use_id → tool_name lookup, populated incrementally during the main loop.
+	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
+	toolNameByID := make(map[string]string)
+
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
@@ -183,6 +187,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 
+						if functionID != "" && functionName != "" {
+							toolNameByID[functionID] = functionName
+						}
+
 						// Handle both object and string input formats
 						var argsRaw string
 						if argsResult.IsObject() {
@@ -225,10 +233,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
 						if toolCallID != "" {
-							funcName := toolCallID
-							toolCallIDs := strings.Split(toolCallID, "-")
-							if len(toolCallIDs) > 1 {
-								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
+							funcName := toolNameByID[toolCallID]
+							if funcName == "" {
+								funcName = toolCallID
+								log.Warnf("antigravity claude request: tool_result references unknown tool_use_id=%s, using ID as function name", toolCallID)
 							}
 							functionResponseResult := contentResult.Get("content")
 
