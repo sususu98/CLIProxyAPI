@@ -233,8 +233,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
 						if toolCallID != "" {
-							funcName := toolNameByID[toolCallID]
-							if funcName == "" {
+							funcName, ok := toolNameByID[toolCallID]
+							if !ok {
 								funcName = toolCallID
 								log.Warnf("antigravity claude request: tool_result references unknown tool_use_id=%s, using ID as function name", toolCallID)
 							}
