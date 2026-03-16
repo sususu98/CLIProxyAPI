@@ -235,8 +235,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if toolCallID != "" {
 							funcName, ok := toolNameByID[toolCallID]
 							if !ok {
-								funcName = toolCallID
-								log.Warnf("antigravity claude request: tool_result references unknown tool_use_id=%s, using ID as function name", toolCallID)
+								// Fallback: derive a semantic name from the ID by stripping
+								// the last two dash-separated segments (e.g. "get_weather-call-123" → "get_weather").
+								// Only use the raw ID as a last resort when the heuristic produces an empty string.
+								parts := strings.Split(toolCallID, "-")
+								if len(parts) > 2 {
+									funcName = strings.Join(parts[:len(parts)-2], "-")
+								}
+								if funcName == "" {
+									funcName = toolCallID
+								}
+								log.Warnf("antigravity claude request: tool_result references unknown tool_use_id=%s, derived function name=%s", toolCallID, funcName)
 							}
 							functionResponseResult := contentResult.Get("content")
 

@@ -506,6 +506,68 @@ func TestConvertClaudeRequestToAntigravity_ToolResultName_CustomFormat(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ToolResultName_NoMatchingToolUse_Heuristic(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "get_weather-call-123",
+						"content": "22C sunny"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	funcResp := gjson.Get(outputStr, "request.contents.0.parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatal("functionResponse should exist")
+	}
+	if got := funcResp.Get("name").String(); got != "get_weather" {
+		t.Errorf("Expected heuristic-derived name 'get_weather', got '%s'", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolResultName_NoMatchingToolUse_RawID(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_tool-48fca351f12844eabf49dad8b63886d2",
+						"content": "result data"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	funcResp := gjson.Get(outputStr, "request.contents.0.parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatal("functionResponse should exist")
+	}
+	got := funcResp.Get("name").String()
+	if got == "" {
+		t.Error("functionResponse.name must not be empty")
+	}
+	if got != "toolu_tool-48fca351f12844eabf49dad8b63886d2" {
+		t.Errorf("Expected raw ID as last-resort name, got '%s'", got)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ThinkingConfig(t *testing.T) {
 	// Note: This test requires the model to be registered in the registry
 	// with Thinking metadata. If the registry is not populated in test environment,
