@@ -2260,8 +2260,9 @@ func statusCodeFromResult(err *Error) int {
 
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. It treats 400 responses with
-// "invalid_request_error" or "INVALID_ARGUMENT", and all 422 responses as
-// request-shape failures where switching auths or pooled upstream models will not help.
+// "invalid_request_error", "INVALID_ARGUMENT" or "FAILED_PRECONDITION", and
+// all 422 responses as request-shape failures where switching auths or pooled
+// upstream models will not help.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2271,7 +2272,8 @@ func isRequestInvalidError(err error) bool {
 	case http.StatusBadRequest:
 		errMsg := err.Error()
 		return strings.Contains(errMsg, "invalid_request_error") ||
-			strings.Contains(errMsg, "INVALID_ARGUMENT")
+			strings.Contains(errMsg, "INVALID_ARGUMENT") ||
+			strings.Contains(errMsg, "FAILED_PRECONDITION")
 	case http.StatusUnprocessableEntity:
 		return true
 	default:
