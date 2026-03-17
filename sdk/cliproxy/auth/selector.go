@@ -738,17 +738,34 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 				if itemType == "reasoning" {
 					return true
 				}
-				if itemType != "message" {
+				// Skip non-message typed items (function_call, function_call_output, etc.)
+				// but allow items with no type that have a role (inline message format).
+				if itemType != "" && itemType != "message" {
 					return true
 				}
 
 				role := item.Get("role").String()
-				text := extractResponsesAPIContent(item.Get("content"))
+				if itemType == "" && role == "" {
+					return true
+				}
+
+				// Handle both string content and array content (multimodal).
+				content := item.Get("content")
+				var text string
+				if content.Type == gjson.String {
+					text = content.String()
+				} else {
+					text = extractResponsesAPIContent(content)
+				}
 				if text == "" {
 					return true
 				}
 
 				switch role {
+				case "developer", "system":
+					if systemPrompt == "" {
+						systemPrompt = truncateString(text, 100)
+					}
 				case "user":
 					if firstUserMsg == "" {
 						firstUserMsg = truncateString(text, 100)
