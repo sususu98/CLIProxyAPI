@@ -597,9 +597,17 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	if len(payload) > 0 {
 		userID := gjson.GetBytes(payload, "metadata.user_id").String()
 		if userID != "" {
+			// Old format: user_{hash}_account__session_{uuid}
 			if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
 				id := "claude:" + matches[1]
 				return id, ""
+			}
+			// New format: JSON object with session_id field
+			// e.g. {"device_id":"...","account_uuid":"...","session_id":"uuid"}
+			if len(userID) > 0 && userID[0] == '{' {
+				if sid := gjson.Get(userID, "session_id").String(); sid != "" {
+					return "claude:" + sid, ""
+				}
 			}
 		}
 	}

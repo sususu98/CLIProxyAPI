@@ -633,6 +633,16 @@ func TestExtractSessionID(t *testing.T) {
 			want:    "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344",
 		},
 		{
+			name:    "json_user_id_with_session_id",
+			payload: `{"metadata":{"user_id":"{\"device_id\":\"be82c3aee1e0c2d74535bacc85f9f559228f02dd8a17298cf522b71e6c375714\",\"account_uuid\":\"\",\"session_id\":\"e26d4046-0f88-4b09-bb5b-f863ab5fb24e\"}"}}`,
+			want:    "claude:e26d4046-0f88-4b09-bb5b-f863ab5fb24e",
+		},
+		{
+			name:    "json_user_id_without_session_id",
+			payload: `{"metadata":{"user_id":"{\"device_id\":\"abc123\"}"}}`,
+			want:    `user:{"device_id":"abc123"}`,
+		},
+		{
 			name:    "no_session_but_user_id",
 			payload: `{"metadata":{"user_id":"user_abc123"}}`,
 			want:    "user:user_abc123",
