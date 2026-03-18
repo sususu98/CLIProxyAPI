@@ -231,7 +231,14 @@ func convertEnumValuesToStrings(jsonStr string) string {
 
 		var stringVals []string
 		for _, item := range arr.Array() {
-			stringVals = append(stringVals, item.String())
+			if s := item.String(); s != "" {
+				stringVals = append(stringVals, s)
+			}
+		}
+
+		if len(stringVals) == 0 {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
 		}
 
 		// Always update enum values to strings and set type to "string"

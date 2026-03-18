@@ -897,6 +897,76 @@ func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_EmptyEnumFiltering(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		input           string
+		wantNoEmpty     bool
+		wantEnumRemoved bool
+	}{
+		{
+			name: "filters empty string from enum with valid values",
+			input: `{
+				"type": "object",
+				"properties": {
+					"memoryType": {"type": "string", "enum": ["activity","context","event","fact","location","other","people","preference","technology","topic",""]}
+				}
+			}`,
+			wantNoEmpty: true,
+		},
+		{
+			name: "removes enum key when all values are empty",
+			input: `{
+				"type": "object",
+				"properties": {
+					"status": {"type": "string", "enum": [""]}
+				}
+			}`,
+			wantEnumRemoved: true,
+		},
+		{
+			name: "filters null-coerced empty from mixed enum",
+			input: `{
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string", "enum": ["a", "", "b"]}
+				}
+			}`,
+			wantNoEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := CleanJSONSchemaForAntigravity(tt.input)
+
+			if tt.wantNoEmpty {
+				parsed := gjson.Get(result, "properties.*.enum")
+				parsed.ForEach(func(_, v gjson.Result) bool {
+					if v.IsArray() {
+						for _, item := range v.Array() {
+							if item.String() == "" {
+								t.Errorf("enum should not contain empty strings, got: %s", result)
+							}
+						}
+					}
+					return true
+				})
+			}
+
+			if tt.wantEnumRemoved {
+				if strings.Contains(result, `"enum"`) {
+					t.Errorf("enum key should be removed when all values are empty, got: %s", result)
+				}
+			}
+		})
+	}
+}
+
 func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *testing.T) {
 	input := `{
 		"$schema": "http://json-schema.org/draft-07/schema#",
