@@ -6,7 +6,47 @@ import (
 	"image"
 	"image/draw"
 	"image/png"
+	"net/http"
+	"strings"
 )
+
+// DetectImageMimeType detects the actual image MIME type from base64 data and
+// returns it if it differs from the declared type. This corrects mismatches
+// where clients declare e.g. image/png but actually send image/webp.
+func DetectImageMimeType(declaredMime, base64Data string) string {
+	if base64Data == "" {
+		return declaredMime
+	}
+
+	// 512 raw bytes needed → ceil(512/3)*4 = 684 base64 chars
+	sample := base64Data
+	if len(sample) > 684 {
+		sample = sample[:684]
+	}
+
+	sample = strings.TrimRight(sample, "=\n\r ")
+
+	raw, err := base64.StdEncoding.DecodeString(sample + strings.Repeat("=", (4-len(sample)%4)%4))
+	if err != nil {
+		raw, err = base64.RawStdEncoding.DecodeString(sample)
+		if err != nil {
+			return declaredMime
+		}
+	}
+
+	detected := http.DetectContentType(raw)
+	if strings.HasPrefix(detected, "image/") {
+		normalizedDeclared := strings.ToLower(strings.TrimSpace(declaredMime))
+		if i := strings.IndexByte(normalizedDeclared, ';'); i >= 0 {
+			normalizedDeclared = strings.TrimSpace(normalizedDeclared[:i])
+		}
+		if detected != normalizedDeclared {
+			return detected
+		}
+	}
+
+	return declaredMime
+}
 
 func CreateWhiteImageBase64(aspectRatio string) (string, error) {
 	width := 1024

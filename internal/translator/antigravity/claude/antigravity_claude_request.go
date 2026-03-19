@@ -18,6 +18,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func detectAndLogImageMime(declared, base64Data string) string {
+	corrected := util.DetectImageMimeType(declared, base64Data)
+	if corrected != declared {
+		log.Debugf("antigravity claude request: image mime corrected: %s -> %s", declared, corrected)
+	}
+	return corrected
+}
+
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini CLI API.
@@ -266,10 +274,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								for _, fr := range frResults {
 									if fr.Get("type").String() == "image" && fr.Get("source.type").String() == "base64" {
 										inlineDataJSON := `{}`
+										data := fr.Get("source.data").String()
 										if mimeType := fr.Get("source.media_type").String(); mimeType != "" {
-											inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", mimeType)
+											inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
 										}
-										if data := fr.Get("source.data").String(); data != "" {
+										if data != "" {
 											inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
 										}
 
@@ -302,10 +311,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							} else if functionResponseResult.IsObject() {
 								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
 									inlineDataJSON := `{}`
+									data := functionResponseResult.Get("source.data").String()
 									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
-										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", mimeType)
+										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
 									}
-									if data := functionResponseResult.Get("source.data").String(); data != "" {
+									if data != "" {
 										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
 									}
 
@@ -334,10 +344,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						sourceResult := contentResult.Get("source")
 						if sourceResult.Get("type").String() == "base64" {
 							inlineDataJSON := `{}`
+							data := sourceResult.Get("data").String()
 							if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
-								inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", mimeType)
+								inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
 							}
-							if data := sourceResult.Get("data").String(); data != "" {
+							if data != "" {
 								inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
 							}
 

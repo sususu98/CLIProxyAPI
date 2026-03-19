@@ -16,6 +16,14 @@ import (
 
 const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 
+func detectAndLogImageMime(declared, base64Data string) string {
+	corrected := util.DetectImageMimeType(declared, base64Data)
+	if corrected != declared {
+		log.Debugf("antigravity openai request: image mime corrected: %s -> %s", declared, corrected)
+	}
+	return corrected
+}
+
 // ConvertOpenAIRequestToAntigravity converts an OpenAI Chat Completions request (raw JSON)
 // into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
 //
@@ -192,7 +200,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
 									mime := pieces[0]
 									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", mime)
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", detectAndLogImageMime(mime, data))
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
 									p++
@@ -206,6 +214,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								ext = sp[len(sp)-1]
 							}
 							if mimeType, ok := misc.MimeTypes[ext]; ok {
+								if strings.HasPrefix(mimeType, "image/") {
+									mimeType = detectAndLogImageMime(mimeType, fileData)
+								}
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", mimeType)
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", fileData)
 								p++
@@ -267,7 +278,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
 									mime := pieces[0]
 									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", mime)
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", detectAndLogImageMime(mime, data))
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
 									p++
