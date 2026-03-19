@@ -76,6 +76,23 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		return
 	}
 
+	// Validate messages: reject empty string content that would produce invalid
+	// Gemini parts (e.g. {"role":"model","parts":[{}]}).
+	if msgs := gjson.GetBytes(rawJSON, "messages"); msgs.IsArray() {
+		for _, msg := range msgs.Array() {
+			contentResult := msg.Get("content")
+			if contentResult.Type == gjson.String && contentResult.String() == "" {
+				c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+					Error: handlers.ErrorDetail{
+						Message: "messages: content must not be empty string",
+						Type:    "invalid_request_error",
+					},
+				})
+				return
+			}
+		}
+	}
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if !streamResult.Exists() || streamResult.Type == gjson.False {
