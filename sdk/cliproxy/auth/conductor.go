@@ -2263,6 +2263,8 @@ func statusCodeFromResult(err *Error) int {
 // "invalid_request_error", "INVALID_ARGUMENT" or "FAILED_PRECONDITION", and
 // all 422 responses as request-shape failures where switching auths or pooled
 // upstream models will not help.
+// It also treats 500 responses with "UNKNOWN" status as non-retryable, since
+// these Google API "Unknown Error" responses do not resolve with retries.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2274,6 +2276,10 @@ func isRequestInvalidError(err error) bool {
 		return strings.Contains(errMsg, "invalid_request_error") ||
 			strings.Contains(errMsg, "INVALID_ARGUMENT") ||
 			strings.Contains(errMsg, "FAILED_PRECONDITION")
+	case http.StatusInternalServerError:
+		errMsg := err.Error()
+		return strings.Contains(errMsg, "\"status\":\"UNKNOWN\"") ||
+			strings.Contains(errMsg, "\"status\": \"UNKNOWN\"")
 	case http.StatusUnprocessableEntity:
 		return true
 	default:
