@@ -170,11 +170,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 
 						// Send as thought block
+						// Always include "text" field — Google Antigravity API requires it
+						// even for redacted thinking where the text is empty.
 						partJSON := `{}`
 						partJSON, _ = sjson.Set(partJSON, "thought", true)
-						if thinkingText != "" {
-							partJSON, _ = sjson.Set(partJSON, "text", thinkingText)
-						}
+						partJSON, _ = sjson.Set(partJSON, "text", thinkingText)
 						partJSON, _ = sjson.Set(partJSON, "thoughtSignature", signature)
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
