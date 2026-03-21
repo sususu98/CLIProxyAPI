@@ -238,6 +238,33 @@ attemptLoop:
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusTooManyRequests {
+					creditsResp, creditsErr := e.attemptCreditsRetry(ctx, auth, token, baseModel, translated, false, opts.Alt, baseURL, bodyBytes)
+					if creditsErr != nil {
+						if sErr, ok := creditsErr.(statusErr); ok {
+							log.Debugf("antigravity executor: credits retry returned HTTP %d for model %s", sErr.code, baseModel)
+						} else {
+							log.Warnf("antigravity executor: credits retry error for model %s: %v", baseModel, creditsErr)
+						}
+					}
+					if creditsResp != nil {
+						recordAPIResponseMetadata(ctx, e.cfg, creditsResp.StatusCode, creditsResp.Header.Clone())
+						creditsBody, creditsReadErr := io.ReadAll(creditsResp.Body)
+						if closeErr := creditsResp.Body.Close(); closeErr != nil {
+							log.Errorf("antigravity executor: close credits response body error: %v", closeErr)
+						}
+						if creditsReadErr == nil {
+							appendAPIResponseChunk(ctx, e.cfg, creditsBody)
+							reporter.publish(ctx, parseAntigravityUsage(creditsBody))
+							var param any
+							converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, creditsBody, &param)
+							resp = cliproxyexecutor.Response{Payload: []byte(converted), Headers: creditsResp.Header.Clone()}
+							reporter.ensurePublished(ctx)
+							return resp, nil
+						} else {
+							recordAPIResponseError(ctx, e.cfg, creditsReadErr)
+							log.Warnf("antigravity executor: credits retry body read error for model %s: %v", baseModel, creditsReadErr)
+						}
+					}
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
 						return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
@@ -397,6 +424,69 @@ attemptLoop:
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusTooManyRequests {
+					creditsResp, creditsErr := e.attemptCreditsRetry(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
+					if creditsErr != nil {
+						if sErr, ok := creditsErr.(statusErr); ok {
+							log.Debugf("antigravity executor: credits retry returned HTTP %d for model %s", sErr.code, baseModel)
+						} else {
+							log.Warnf("antigravity executor: credits retry error for model %s: %v", baseModel, creditsErr)
+						}
+					}
+					if creditsResp != nil {
+						recordAPIResponseMetadata(ctx, e.cfg, creditsResp.StatusCode, creditsResp.Header.Clone())
+						creditsOut := make(chan cliproxyexecutor.StreamChunk)
+						go func(r *http.Response) {
+							defer close(creditsOut)
+							defer func() {
+								if errClose := r.Body.Close(); errClose != nil {
+									log.Errorf("antigravity executor: close credits response body error: %v", errClose)
+								}
+							}()
+							scanner := bufio.NewScanner(r.Body)
+							scanner.Buffer(nil, streamScannerBuffer)
+							for scanner.Scan() {
+								line := scanner.Bytes()
+								appendAPIResponseChunk(ctx, e.cfg, line)
+								line = FilterSSEUsageMetadata(line)
+								payload := jsonPayload(line)
+								if payload == nil {
+									continue
+								}
+								if detail, ok := parseAntigravityStreamUsage(payload); ok {
+									reporter.publish(ctx, detail)
+								}
+								creditsOut <- cliproxyexecutor.StreamChunk{Payload: payload}
+							}
+							if errScan := scanner.Err(); errScan != nil {
+								recordAPIResponseError(ctx, e.cfg, errScan)
+								reporter.publishFailure(ctx)
+								creditsOut <- cliproxyexecutor.StreamChunk{Err: errScan}
+							} else {
+								reporter.ensurePublished(ctx)
+							}
+						}(creditsResp)
+
+						var creditsBuffer bytes.Buffer
+						for chunk := range creditsOut {
+							if chunk.Err != nil {
+								log.Warnf("antigravity executor: credits retry stream error for model %s: %v", baseModel, chunk.Err)
+								break
+							}
+							if len(chunk.Payload) > 0 {
+								_, _ = creditsBuffer.Write(chunk.Payload)
+								_, _ = creditsBuffer.Write([]byte("\n"))
+							}
+						}
+						if creditsBuffer.Len() > 0 {
+							creditsPayload := e.convertStreamToNonStream(creditsBuffer.Bytes())
+							reporter.publish(ctx, parseAntigravityUsage(creditsPayload))
+							var param any
+							converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, creditsPayload, &param)
+							resp = cliproxyexecutor.Response{Payload: []byte(converted), Headers: creditsResp.Header.Clone()}
+							reporter.ensurePublished(ctx)
+							return resp, nil
+						}
+					}
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
 						return resp, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
@@ -690,6 +780,62 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 	return []byte(output)
 }
 
+func (e *AntigravityExecutor) startAntigravitySSEStream(
+	ctx context.Context,
+	httpResp *http.Response,
+	to, from sdktranslator.Format,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	translated []byte,
+	reporter *usageReporter,
+) <-chan cliproxyexecutor.StreamChunk {
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func(resp *http.Response) {
+		defer close(out)
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.Errorf("antigravity executor: close response body error: %v", errClose)
+			}
+		}()
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(nil, streamScannerBuffer)
+		var param any
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			appendAPIResponseChunk(ctx, e.cfg, line)
+
+			line = FilterSSEUsageMetadata(line)
+
+			payload := jsonPayload(line)
+			if payload == nil {
+				continue
+			}
+
+			if detail, ok := parseAntigravityStreamUsage(payload); ok {
+				reporter.publish(ctx, detail)
+			}
+
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		} else {
+			tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
+			for i := range tail {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
+			}
+			reporter.ensurePublished(ctx)
+		}
+	}(httpResp)
+
+	return out
+}
+
 // ExecuteStream performs a streaming request to the Antigravity API.
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
@@ -804,6 +950,19 @@ attemptLoop:
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusTooManyRequests {
+					creditsResp, creditsErr := e.attemptCreditsRetry(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
+					if creditsErr != nil {
+						if sErr, ok := creditsErr.(statusErr); ok {
+							log.Debugf("antigravity executor: credits retry returned HTTP %d for model %s", sErr.code, baseModel)
+						} else {
+							log.Warnf("antigravity executor: credits retry error for model %s: %v", baseModel, creditsErr)
+						}
+					}
+					if creditsResp != nil {
+						recordAPIResponseMetadata(ctx, e.cfg, creditsResp.StatusCode, creditsResp.Header.Clone())
+						out := e.startAntigravitySSEStream(ctx, creditsResp, to, from, req, opts, translated, reporter)
+						return &cliproxyexecutor.StreamResult{Headers: creditsResp.Header.Clone(), Chunks: out}, nil
+					}
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						log.Debugf("antigravity executor: rate limited with retryDelay %s, returning to conductor", *retryAfter)
 						return nil, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), retryAfter: retryAfter}
@@ -836,51 +995,7 @@ attemptLoop:
 				return nil, err
 			}
 
-			out := make(chan cliproxyexecutor.StreamChunk)
-			go func(resp *http.Response) {
-				defer close(out)
-				defer func() {
-					if errClose := resp.Body.Close(); errClose != nil {
-						log.Errorf("antigravity executor: close response body error: %v", errClose)
-					}
-				}()
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
-				var param any
-				for scanner.Scan() {
-					line := scanner.Bytes()
-					appendAPIResponseChunk(ctx, e.cfg, line)
-
-					// Filter usage metadata for all models
-					// Only retain usage statistics in the terminal chunk
-					line = FilterSSEUsageMetadata(line)
-
-					payload := jsonPayload(line)
-					if payload == nil {
-						continue
-					}
-
-					if detail, ok := parseAntigravityStreamUsage(payload); ok {
-						reporter.publish(ctx, detail)
-					}
-
-					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
-					for i := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
-					}
-				}
-				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
-				for i := range tail {
-					out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
-				}
-				if errScan := scanner.Err(); errScan != nil {
-					recordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.publishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
-				} else {
-					reporter.ensurePublished(ctx)
-				}
-			}(httpResp)
+			out := e.startAntigravitySSEStream(ctx, httpResp, to, from, req, opts, translated, reporter)
 			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 		}
 

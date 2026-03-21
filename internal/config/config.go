@@ -97,6 +97,14 @@ type Config struct {
 	// When false, client signatures are used directly after normalization (bypass mode).
 	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
 
+	// AntigravityAICreditsEnabled controls whether AI Credits (overages) are used
+	// when free quota is exhausted for Antigravity accounts.
+	// When true, 429 quota_exhausted responses trigger a retry with
+	// enabledCreditTypes: ["GOOGLE_ONE_AI"] injected into the request payload.
+	// This uses the account's Google One AI Credits to pay for additional usage.
+	// When false (default), quota exhaustion is handled normally via cooldown/account switching.
+	AntigravityAICreditsEnabled *bool `yaml:"antigravity-ai-credits-enabled,omitempty" json:"antigravity-ai-credits-enabled,omitempty"`
+
 	// AntigravityUserAgents configures default User-Agent headers for Antigravity upstream API requests.
 	// Per-auth user_agent attribute (in auth file metadata) takes precedence over these global defaults.
 	AntigravityUserAgents AntigravityUserAgents `yaml:"antigravity-user-agents" json:"antigravity-user-agents"`

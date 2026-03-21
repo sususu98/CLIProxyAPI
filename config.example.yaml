@@ -115,6 +115,14 @@ nonstream-keepalive-interval: 0
 # When false, client signatures are used directly after normalization (bypass mode for testing).
 # antigravity-signature-cache-enabled: true
 
+# AI Credits (overages) for Antigravity accounts.
+# When enabled, if a request returns 429 due to free quota exhaustion (quota_exhausted),
+# the proxy automatically retries with Google One AI Credits injected.
+# Requires the Google account to have available AI Credits (e.g. Google One AI subscription).
+# Credits exhaustion is tracked in memory with a 5-hour cooldown.
+# Default: false (disabled — quota exhaustion handled via normal cooldown/account switching).
+# antigravity-ai-credits-enabled: false
+
 # Antigravity User-Agent configuration.
 # Controls the User-Agent header sent to upstream Antigravity APIs.
 #
