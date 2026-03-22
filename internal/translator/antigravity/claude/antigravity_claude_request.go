@@ -301,8 +301,29 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
 								}
 
+								// Place image data inside functionResponse.parts as inlineData
+								// instead of as sibling parts in the outer content, to avoid
+								// base64 data bloating the text context.
+								if gjson.Get(imagePartsJSON, "#").Int() > 0 {
+									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "parts", imagePartsJSON)
+								}
+
 							} else if functionResponseResult.IsObject() {
 								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
+									inlineDataJSON := `{}`
+									data := functionResponseResult.Get("source.data").String()
+									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
+										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
+									}
+									if data != "" {
+										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
+									}
+
+									imagePartJSON := `{}`
+									imagePartJSON, _ = sjson.SetRaw(imagePartJSON, "inlineData", inlineDataJSON)
+									imagePartsJSON := "[]"
+									imagePartsJSON, _ = sjson.SetRaw(imagePartsJSON, "-1", imagePartJSON)
+									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "parts", imagePartsJSON)
 									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
 								} else {
 									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
