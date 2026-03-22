@@ -354,18 +354,31 @@ func flattenAnyOfOneOf(jsonStr string) string {
 
 			items := arr.Array()
 			bestIdx, allTypes := selectBest(items)
-			selected := items[bestIdx].Raw
+			selected := items[bestIdx]
+
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+
+			selected.ForEach(func(k, v gjson.Result) bool {
+				fieldPath := joinPath(parentPath, escapeGJSONPathKey(k.String()))
+				jsonStr, _ = sjson.SetRaw(jsonStr, fieldPath, v.Raw)
+				return true
+			})
 
 			if parentDesc != "" {
-				selected = mergeDescriptionRaw(selected, parentDesc)
+				childDesc := gjson.Get(jsonStr, descriptionPath(parentPath)).String()
+				if childDesc != parentDesc {
+					merged := parentDesc
+					if childDesc != "" {
+						merged = fmt.Sprintf("%s (%s)", parentDesc, childDesc)
+					}
+					jsonStr, _ = sjson.Set(jsonStr, descriptionPath(parentPath), merged)
+				}
 			}
 
 			if len(allTypes) > 1 {
 				hint := "Accepts: " + strings.Join(allTypes, " | ")
-				selected = appendHintRaw(selected, hint)
+				jsonStr = appendHint(jsonStr, parentPath, hint)
 			}
-
-			jsonStr = setRawAt(jsonStr, parentPath, selected)
 		}
 	}
 	return jsonStr
