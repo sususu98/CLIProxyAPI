@@ -301,40 +301,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
 								}
 
-								// Place image data as sibling inlineData parts at the content level.
-								// Gemini does not support a "parts" field inside functionResponse.
-								if gjson.Get(imagePartsJSON, "#").Int() > 0 {
-									partJSON := `{}`
-									partJSON, _ = sjson.SetRaw(partJSON, "functionResponse", functionResponseJSON)
-									clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
-
-									for _, imgPart := range gjson.Parse(imagePartsJSON).Array() {
-										clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", imgPart.Raw)
-									}
-									continue
-								}
-
 							} else if functionResponseResult.IsObject() {
 								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
-									inlineDataJSON := `{}`
-									data := functionResponseResult.Get("source.data").String()
-									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
-										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
-									}
-									if data != "" {
-										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
-									}
-
 									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
-
-									partJSON := `{}`
-									partJSON, _ = sjson.SetRaw(partJSON, "functionResponse", functionResponseJSON)
-									clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
-
-									imagePartJSON := `{}`
-									imagePartJSON, _ = sjson.SetRaw(imagePartJSON, "inlineData", inlineDataJSON)
-									clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", imagePartJSON)
-									continue
 								} else {
 									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
 								}
