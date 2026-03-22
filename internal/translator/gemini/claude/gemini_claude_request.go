@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -84,7 +85,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
 					case "tool_use":
-						functionName := contentResult.Get("name").String()
+						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						if toolUseID := contentResult.Get("id").String(); toolUseID != "" {
 							if derived := toolNameFromClaudeToolUseID(toolUseID); derived != "" {
 								functionName = derived
@@ -111,7 +112,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 						responseData := contentResult.Get("content").Raw
 						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
-						part, _ = sjson.Set(part, "functionResponse.name", funcName)
+						part, _ = sjson.Set(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
 						part, _ = sjson.Set(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
@@ -152,6 +153,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				inputSchema := inputSchemaResult.Raw
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
+				tool, _ = sjson.Set(tool, "name", util.SanitizeFunctionName(gjson.Get(tool, "name").String()))
 				tool, _ = sjson.Delete(tool, "strict")
 				tool, _ = sjson.Delete(tool, "input_examples")
 				tool, _ = sjson.Delete(tool, "type")
@@ -194,7 +196,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		case "tool":
 			out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
-				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
 	}

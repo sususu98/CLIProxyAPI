@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -297,7 +298,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 				modelContent := `{"role":"model","parts":[]}`
 				functionCall := `{"functionCall":{"name":"","args":{}}}`
-				functionCall, _ = sjson.Set(functionCall, "functionCall.name", name)
+				functionCall, _ = sjson.Set(functionCall, "functionCall.name", util.SanitizeFunctionName(name))
 				functionCall, _ = sjson.Set(functionCall, "thoughtSignature", geminiResponsesThoughtSignature)
 				functionCall, _ = sjson.Set(functionCall, "functionCall.id", item.Get("call_id").String())
 
@@ -335,7 +336,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					})
 				}
 
-				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)
+				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", util.SanitizeFunctionName(functionName))
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.id", callID)
 
 				// Set the raw JSON output directly (preserves string encoding)
@@ -376,7 +377,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
 
 				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
+					funcDecl, _ = sjson.Set(funcDecl, "name", util.SanitizeFunctionName(name.String()))
 				}
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
