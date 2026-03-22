@@ -301,11 +301,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
 								}
 
-								// Place image data inside functionResponse.parts as inlineData
-								// instead of as sibling parts in the outer content, to avoid
-								// base64 data bloating the text context.
+								// Place image data as sibling inlineData parts at the content level.
+								// Gemini does not support a "parts" field inside functionResponse.
 								if gjson.Get(imagePartsJSON, "#").Int() > 0 {
-									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "parts", imagePartsJSON)
+									partJSON := `{}`
+									partJSON, _ = sjson.SetRaw(partJSON, "functionResponse", functionResponseJSON)
+									clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
+
+									for _, imgPart := range gjson.Parse(imagePartsJSON).Array() {
+										clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", imgPart.Raw)
+									}
+									continue
 								}
 
 							} else if functionResponseResult.IsObject() {
@@ -319,12 +325,16 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 										inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
 									}
 
+									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
+
+									partJSON := `{}`
+									partJSON, _ = sjson.SetRaw(partJSON, "functionResponse", functionResponseJSON)
+									clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
+
 									imagePartJSON := `{}`
 									imagePartJSON, _ = sjson.SetRaw(imagePartJSON, "inlineData", inlineDataJSON)
-									imagePartsJSON := "[]"
-									imagePartsJSON, _ = sjson.SetRaw(imagePartsJSON, "-1", imagePartJSON)
-									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "parts", imagePartsJSON)
-									functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
+									clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", imagePartJSON)
+									continue
 								} else {
 									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
 								}

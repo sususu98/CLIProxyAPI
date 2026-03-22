@@ -955,8 +955,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNullContent(t *testing.T) {
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 	// tool_result with array content containing text + image should place
-	// image data inside functionResponse.parts as inlineData, not as a
-	// sibling part in the outer content (to avoid base64 context bloat).
+	// image data as sibling inlineData parts at content level.
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -993,22 +992,27 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 		t.Fatalf("Result is not valid JSON:\n%s", outputStr)
 	}
 
-	// Image should be inside functionResponse.parts, not as outer sibling part
 	funcResp := gjson.Get(outputStr, "request.contents.0.parts.0.functionResponse")
 	if !funcResp.Exists() {
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Text content should be in response.result
 	resultText := funcResp.Get("response.result.text").String()
 	if resultText != "File content here" {
 		t.Errorf("Expected response.result.text = 'File content here', got '%s'", resultText)
 	}
 
-	// Image should be in functionResponse.parts[0].inlineData
-	inlineData := funcResp.Get("parts.0.inlineData")
+	if funcResp.Get("parts").Exists() {
+		t.Error("functionResponse should NOT have inner parts field")
+	}
+
+	outerParts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(outerParts) != 2 {
+		t.Fatalf("Expected 2 outer parts (functionResponse + inlineData), got %d", len(outerParts))
+	}
+	inlineData := outerParts[1].Get("inlineData")
 	if !inlineData.Exists() {
-		t.Fatal("functionResponse.parts[0].inlineData should exist")
+		t.Fatal("second outer part should be inlineData")
 	}
 	if inlineData.Get("mimeType").String() != "image/png" {
 		t.Errorf("Expected mimeType 'image/png', got '%s'", inlineData.Get("mimeType").String())
@@ -1016,17 +1020,11 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 	if !strings.Contains(inlineData.Get("data").String(), "iVBORw0KGgo") {
 		t.Error("data mismatch")
 	}
-
-	// Image should NOT be in outer parts (only functionResponse part should exist)
-	outerParts := gjson.Get(outputStr, "request.contents.0.parts")
-	if outerParts.IsArray() && len(outerParts.Array()) > 1 {
-		t.Errorf("Expected only 1 outer part (functionResponse), got %d", len(outerParts.Array()))
-	}
 }
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.T) {
 	// tool_result with single image object as content should place
-	// image data inside functionResponse.parts, not as outer sibling part.
+	// image data as sibling inlineData part at content level.
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -1062,30 +1060,30 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 		t.Fatal("functionResponse should exist")
 	}
 
-	// response.result should be empty (image only)
 	if funcResp.Get("response.result").String() != "" {
 		t.Errorf("Expected empty response.result for image-only content, got '%s'", funcResp.Get("response.result").String())
 	}
 
-	// Image should be in functionResponse.parts[0].inlineData
-	inlineData := funcResp.Get("parts.0.inlineData")
+	if funcResp.Get("parts").Exists() {
+		t.Error("functionResponse should NOT have inner parts field")
+	}
+
+	outerParts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(outerParts) != 2 {
+		t.Fatalf("Expected 2 outer parts (functionResponse + inlineData), got %d", len(outerParts))
+	}
+	inlineData := outerParts[1].Get("inlineData")
 	if !inlineData.Exists() {
-		t.Fatal("functionResponse.parts[0].inlineData should exist")
+		t.Fatal("second outer part should be inlineData")
 	}
 	if inlineData.Get("mimeType").String() != "image/jpeg" {
 		t.Errorf("Expected mimeType 'image/jpeg', got '%s'", inlineData.Get("mimeType").String())
-	}
-
-	// Image should NOT be in outer parts
-	outerParts := gjson.Get(outputStr, "request.contents.0.parts")
-	if outerParts.IsArray() && len(outerParts.Array()) > 1 {
-		t.Errorf("Expected only 1 outer part, got %d", len(outerParts.Array()))
 	}
 }
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(t *testing.T) {
 	// tool_result with array content: 2 text items + 2 images
-	// All images go into functionResponse.parts, texts into response.result array
+	// All images go as sibling inlineData parts, texts into response.result array
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -1125,7 +1123,6 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Multiple text items => response.result is an array
 	resultArr := funcResp.Get("response.result")
 	if !resultArr.IsArray() {
 		t.Fatalf("Expected response.result to be an array, got: %s", resultArr.Raw)
@@ -1135,28 +1132,25 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		t.Fatalf("Expected 2 result items, got %d", len(results))
 	}
 
-	// Both images should be in functionResponse.parts
-	imgParts := funcResp.Get("parts").Array()
-	if len(imgParts) != 2 {
-		t.Fatalf("Expected 2 image parts in functionResponse.parts, got %d", len(imgParts))
-	}
-	if imgParts[0].Get("inlineData.mimeType").String() != "image/png" {
-		t.Errorf("Expected first image mimeType 'image/png', got '%s'", imgParts[0].Get("inlineData.mimeType").String())
-	}
-	if imgParts[0].Get("inlineData.data").String() != "AAAA" {
-		t.Errorf("Expected first image data 'AAAA', got '%s'", imgParts[0].Get("inlineData.data").String())
-	}
-	if imgParts[1].Get("inlineData.mimeType").String() != "image/jpeg" {
-		t.Errorf("Expected second image mimeType 'image/jpeg', got '%s'", imgParts[1].Get("inlineData.mimeType").String())
-	}
-	if imgParts[1].Get("inlineData.data").String() != "BBBB" {
-		t.Errorf("Expected second image data 'BBBB', got '%s'", imgParts[1].Get("inlineData.data").String())
+	if funcResp.Get("parts").Exists() {
+		t.Error("functionResponse should NOT have inner parts field")
 	}
 
-	// Only 1 outer part (the functionResponse itself)
 	outerParts := gjson.Get(outputStr, "request.contents.0.parts").Array()
-	if len(outerParts) != 1 {
-		t.Errorf("Expected 1 outer part, got %d", len(outerParts))
+	if len(outerParts) != 3 {
+		t.Fatalf("Expected 3 outer parts (functionResponse + 2 inlineData), got %d", len(outerParts))
+	}
+	if outerParts[1].Get("inlineData.mimeType").String() != "image/png" {
+		t.Errorf("Expected first image mimeType 'image/png', got '%s'", outerParts[1].Get("inlineData.mimeType").String())
+	}
+	if outerParts[1].Get("inlineData.data").String() != "AAAA" {
+		t.Errorf("Expected first image data 'AAAA', got '%s'", outerParts[1].Get("inlineData.data").String())
+	}
+	if outerParts[2].Get("inlineData.mimeType").String() != "image/jpeg" {
+		t.Errorf("Expected second image mimeType 'image/jpeg', got '%s'", outerParts[2].Get("inlineData.mimeType").String())
+	}
+	if outerParts[2].Get("inlineData.data").String() != "BBBB" {
+		t.Errorf("Expected second image data 'BBBB', got '%s'", outerParts[2].Get("inlineData.data").String())
 	}
 }
 
@@ -1199,27 +1193,23 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *t
 		t.Fatal("functionResponse should exist")
 	}
 
-	// No text => response.result should be empty string
 	if funcResp.Get("response.result").String() != "" {
 		t.Errorf("Expected empty response.result, got '%s'", funcResp.Get("response.result").String())
 	}
 
-	// Both images in functionResponse.parts
-	imgParts := funcResp.Get("parts").Array()
-	if len(imgParts) != 2 {
-		t.Fatalf("Expected 2 image parts, got %d", len(imgParts))
-	}
-	if imgParts[0].Get("inlineData.mimeType").String() != "image/png" {
-		t.Error("first image mimeType mismatch")
-	}
-	if imgParts[1].Get("inlineData.mimeType").String() != "image/gif" {
-		t.Error("second image mimeType mismatch")
+	if funcResp.Get("parts").Exists() {
+		t.Error("functionResponse should NOT have inner parts field")
 	}
 
-	// Only 1 outer part
 	outerParts := gjson.Get(outputStr, "request.contents.0.parts").Array()
-	if len(outerParts) != 1 {
-		t.Errorf("Expected 1 outer part, got %d", len(outerParts))
+	if len(outerParts) != 3 {
+		t.Fatalf("Expected 3 outer parts (functionResponse + 2 inlineData), got %d", len(outerParts))
+	}
+	if outerParts[1].Get("inlineData.mimeType").String() != "image/png" {
+		t.Error("first image mimeType mismatch")
+	}
+	if outerParts[2].Get("inlineData.mimeType").String() != "image/gif" {
+		t.Error("second image mimeType mismatch")
 	}
 }
 
@@ -1313,15 +1303,20 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingData(t *testing
 	}
 
 	// The image is still classified as base64 image (type check passes),
-	// but data field is missing => inlineData has mimeType but no data
-	imgParts := funcResp.Get("parts").Array()
-	if len(imgParts) != 1 {
-		t.Fatalf("Expected 1 image part, got %d", len(imgParts))
+	// but data field is missing => inlineData has mimeType but no data.
+	// Image placed as sibling part at content level.
+	if funcResp.Get("parts").Exists() {
+		t.Error("functionResponse should NOT have inner parts field")
 	}
-	if imgParts[0].Get("inlineData.mimeType").String() != "image/png" {
+	outerParts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(outerParts) != 2 {
+		t.Fatalf("Expected 2 outer parts (functionResponse + inlineData), got %d", len(outerParts))
+	}
+	inlineData := outerParts[1].Get("inlineData")
+	if inlineData.Get("mimeType").String() != "image/png" {
 		t.Error("mimeType should still be set")
 	}
-	if imgParts[0].Get("inlineData.data").Exists() {
+	if inlineData.Get("data").Exists() {
 		t.Error("data should not exist when source.data is missing")
 	}
 }
@@ -1364,14 +1359,19 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingMediaType(t *te
 
 	// The image is still classified as base64 image,
 	// but media_type is missing => inlineData has data but no mimeType
-	imgParts := funcResp.Get("parts").Array()
-	if len(imgParts) != 1 {
-		t.Fatalf("Expected 1 image part, got %d", len(imgParts))
+	imgParts := funcResp.Get("parts")
+	if imgParts.Exists() {
+		t.Error("functionResponse should NOT have inner parts field")
 	}
-	if imgParts[0].Get("inlineData.mimeType").Exists() {
+	outerParts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(outerParts) != 2 {
+		t.Fatalf("Expected 2 outer parts (functionResponse + inlineData), got %d", len(outerParts))
+	}
+	inlineData := outerParts[1].Get("inlineData")
+	if inlineData.Get("mimeType").Exists() {
 		t.Error("mimeType should not exist when media_type is missing")
 	}
-	if imgParts[0].Get("inlineData.data").String() != "AAAA" {
+	if inlineData.Get("data").String() != "AAAA" {
 		t.Error("data should still be set")
 	}
 }
