@@ -355,6 +355,78 @@ func TestCleanJSONSchemaForAntigravity_RequiredCleanup(t *testing.T) {
 	compareJSON(t, expected, result)
 }
 
+func TestCleanJSONSchemaForAntigravity_RequiredCleanup_NonObjectType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "required on string type removed",
+			input:    `{"type":"string","required":["a","b"],"properties":{"a":{"type":"string"},"b":{"type":"string"}}}`,
+			expected: `{"type":"string","properties":{"a":{"type":"string"},"b":{"type":"string"}}}`,
+		},
+		{
+			name:     "required on array type removed",
+			input:    `{"type":"array","items":{"type":"string"},"required":["x"]}`,
+			expected: `{"type":"array","items":{"type":"string"}}`,
+		},
+		{
+			name:     "required on object type kept",
+			input:    `{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}`,
+			expected: `{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}`,
+		},
+		{
+			name:     "required with missing properties removed",
+			input:    `{"type":"object","required":["a","b"]}`,
+			expected: `{"type":"object","properties":{"reason":{"description":"Brief explanation of why you are calling this tool","type":"string"}},"required":["reason"]}`,
+		},
+		{
+			name: "nested items.required removed when items.type is not object",
+			input: `{"type":"object","properties":{"edits":{"type":"array","items":{"type":"string","required":["a"],"properties":{"a":{"type":"string"}}}}},
+				"required":["edits"]}`,
+			expected: `{"type":"object","properties":{"edits":{"type":"array","items":{"type":"string","properties":{"a":{"type":"string"}}}}},
+				"required":["edits"]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := CleanJSONSchemaForAntigravity(tt.input)
+			compareJSON(t, tt.expected, result)
+		})
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_RequiredCleanup_FlattenThenCleanup(t *testing.T) {
+	t.Parallel()
+	input := `{
+		"type": "object",
+		"properties": {
+			"edits": {
+				"type": "array",
+				"items": {
+					"type": ["string", "object"],
+					"properties": {
+						"path": {"type": "string"},
+						"content": {"type": "string"}
+					},
+					"required": ["path", "content"]
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	itemsRequired := gjson.Get(result, "properties.edits.items.required")
+	itemsType := gjson.Get(result, "properties.edits.items.type").String()
+
+	if itemsType != "object" && itemsRequired.Exists() {
+		t.Errorf("items.type=%q but required still present: %s", itemsType, itemsRequired.Raw)
+	}
+}
+
 func TestCleanJSONSchemaForAntigravity_AllOfMerging_DotKeys(t *testing.T) {
 	input := `{
 		"type": "object",

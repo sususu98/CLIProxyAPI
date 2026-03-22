@@ -544,10 +544,25 @@ func cleanupRequiredFields(jsonStr string) string {
 	for _, p := range findPaths(jsonStr, "required") {
 		parentPath := trimSuffix(p, ".required")
 		propsPath := joinPath(parentPath, "properties")
+		typePath := joinPath(parentPath, "type")
 
 		req := gjson.Get(jsonStr, p)
+		if !req.IsArray() {
+			continue
+		}
+
+		// "required" is only valid for object-type schemas. After
+		// flattenTypeArrays / flattenAnyOfOneOf the type may have changed
+		// from "object" to something else while "required" remained.
+		typeVal := gjson.Get(jsonStr, typePath)
+		if typeVal.Exists() && typeVal.String() != "object" {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
+		}
+
 		props := gjson.Get(jsonStr, propsPath)
-		if !req.IsArray() || !props.IsObject() {
+		if !props.IsObject() {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
 			continue
 		}
 
