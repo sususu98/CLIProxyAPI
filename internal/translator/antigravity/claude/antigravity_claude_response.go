@@ -61,6 +61,10 @@ type Params struct {
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
+
+	// Reverse map: sanitized Gemini function name → original Claude tool name.
+	// Populated lazily on the first response chunk from the original request JSON.
+	ToolNameMap map[string]string
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -88,6 +92,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
+			ToolNameMap:      util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
@@ -250,7 +255,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude Code API compatibility
 				params.HasToolUse = true
-				fcName := functionCallResult.Get("name").String()
+				fcName := util.RestoreSanitizedToolName(params.ToolNameMap, functionCallResult.Get("name").String())
 
 				// Handle state transitions when switching to function calls
 				// Close any existing function call block first
@@ -397,7 +402,7 @@ func resolveStopReason(params *Params) string {
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
+	toolNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	root := gjson.ParseBytes(rawJSON)
@@ -507,7 +512,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				flushText()
 				hasToolCall = true
 
-				name := functionCall.Get("name").String()
+				name := util.RestoreSanitizedToolName(toolNameMap, functionCall.Get("name").String())
 				toolIDCounter++
 				toolBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 				toolBlock, _ = sjson.Set(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
