@@ -83,6 +83,7 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
+	jsonStr = removeUnknownSchemaFields(jsonStr)
 	if !addPlaceholder {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
@@ -551,6 +552,80 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 			return true
 		})
 	}
+}
+
+// allowedSchemaFields are the fields allowed in a Gemini API Schema object.
+// Any other field is removed to prevent "Unknown name" errors from the protobuf-based API.
+// Reference: google.ai.generativelanguage.v1beta.Schema proto definition.
+var allowedSchemaFields = map[string]bool{
+	"type": true, "description": true, "enum": true,
+	"items": true, "properties": true, "required": true,
+	"nullable": true, "title": true,
+	"minimum": true, "maximum": true, "example": true,
+}
+
+// removeUnknownSchemaFields removes any field not in the Gemini Schema whitelist.
+// This is a safety net to catch non-standard fields (e.g., domain-specific annotations
+// like "fmp", "oecd") that survive earlier keyword-based cleanup.
+func removeUnknownSchemaFields(jsonStr string) string {
+	var deletePaths []string
+	walkForUnknownFields(gjson.Parse(jsonStr), "", false, &deletePaths)
+	if len(deletePaths) == 0 {
+		return jsonStr
+	}
+	sortByDepth(deletePaths)
+	for _, p := range deletePaths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
+	}
+	return jsonStr
+}
+
+func walkForUnknownFields(value gjson.Result, path string, inSchema bool, paths *[]string) {
+	if value.IsArray() {
+		arr := value.Array()
+		for i, item := range arr {
+			walkForUnknownFields(item, joinPath(path, strconv.Itoa(i)), inSchema, paths)
+		}
+		return
+	}
+
+	if !value.IsObject() {
+		return
+	}
+
+	// An object is a schema if it has "type" or "properties" — this prevents
+	// stripping non-schema fields when called on the full request payload.
+	isSchema := inSchema || value.Get("type").Exists() || value.Get("properties").Exists()
+
+	if !isSchema {
+		value.ForEach(func(key, val gjson.Result) bool {
+			safeKey := escapeGJSONPathKey(key.String())
+			walkForUnknownFields(val, joinPath(path, safeKey), false, paths)
+			return true
+		})
+		return
+	}
+
+	value.ForEach(func(key, val gjson.Result) bool {
+		keyStr := key.String()
+		safeKey := escapeGJSONPathKey(keyStr)
+		childPath := joinPath(path, safeKey)
+
+		// Inside a "properties" map, children are user-defined property names.
+		// Don't filter them — only recurse into their values (which are schemas).
+		if isPropertyDefinition(path) {
+			walkForUnknownFields(val, childPath, true, paths)
+			return true
+		}
+
+		if !allowedSchemaFields[keyStr] {
+			*paths = append(*paths, childPath)
+			return true
+		}
+
+		walkForUnknownFields(val, childPath, true, paths)
+		return true
+	})
 }
 
 func cleanupRequiredFields(jsonStr string) string {

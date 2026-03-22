@@ -85,7 +85,28 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
 	toolNameByID := make(map[string]string)
 
+	// Pre-scan: collect all tool_result IDs to detect orphan tool_use blocks.
+	// Claude requires every tool_use to have a matching tool_result in the next message.
+	// Clients may truncate conversation history, leaving orphan tool_use blocks that
+	// cause "tool_use ids were found without tool_result blocks" errors.
+	resolvedToolIDs := make(map[string]bool)
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
+	if messagesResult.IsArray() {
+		for _, msg := range messagesResult.Array() {
+			contents := msg.Get("content")
+			if !contents.IsArray() {
+				continue
+			}
+			for _, c := range contents.Array() {
+				if c.Get("type").String() == "tool_result" {
+					if id := c.Get("tool_use_id").String(); id != "" {
+						resolvedToolIDs[id] = true
+					}
+				}
+			}
+		}
+	}
+
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 		numMessages := len(messageResults)
@@ -152,19 +173,18 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								continue
 							}
 						} else {
-							// Bypass mode: validate Claude signature format, drop invalid
 							signatureResult := contentResult.Get("signature")
 							if signatureResult.Exists() && signatureResult.String() != "" {
 								rawSig := signatureResult.String()
-								if isValidClaudeSignature(rawSig) {
-									signature = normalizeSignature(rawSig)
+								sigType := detectSignatureType(rawSig)
+								modelGroup := cache.GetModelGroup(modelName)
+								if sigType != "" && sigType == modelGroup {
+									signature = normalizeSignatureForModel(rawSig, modelName)
 									currentMessageThinkingSignature = signature
 								}
 							}
-							// Invalid/missing signature: drop thinking block (Antigravity validates signatures strictly)
 							if signature == "" {
-								log.Warnf("antigravity claude request: dropping thinking block with invalid signature (bypass mode, textLen=%d)", len(thinkingText))
-								enableThoughtTranslate = false
+								log.Warnf("antigravity claude request: dropping thinking block with incompatible signature (bypass mode, model=%s, textLen=%d)", modelName, len(thinkingText))
 								continue
 							}
 						}
@@ -194,6 +214,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
+
+						// Skip orphan tool_use blocks that have no matching tool_result
+						if functionID != "" && !resolvedToolIDs[functionID] {
+							log.Warnf("antigravity claude request: skipping orphan tool_use id=%s name=%s (no matching tool_result in conversation)", functionID, functionName)
+							continue
+						}
 
 						if functionID != "" && functionName != "" {
 							toolNameByID[functionID] = functionName
@@ -558,97 +584,120 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	return outBytes
 }
 
-// normalizeSignature converts signatures to the format required by Antigravity (2-layer Base64).
-// Used in bypass mode (signature-cache-enabled: false) to ensure correct signature format.
+// detectSignatureType identifies which model family a signature belongs to.
+// Returns "claude", "gemini", or "" (unknown).
 //
-// Input formats:
-//   - "xxx#..." (CLIProxyAPI format) -> extract signature after "#"
-//   - "E..." (Anthropic, 1-layer Base64) -> Base64 encode to 2-layer
-//   - "R..." (Vertex, 2-layer Base64) -> return as-is
+// detectSignatureType identifies the model family that produced a signature.
 //
-// Output: raw signature in 2-layer Base64 format (no prefix), ready for Antigravity.
-func normalizeSignature(rawSignature string) string {
-	// Extract signature if it has "xxx#" prefix
-	if idx := strings.Index(rawSignature, "#"); idx != -1 {
-		rawSignature = rawSignature[idx+1:]
+// Detection is based on Base64 prefix and protobuf internal structure:
+//
+//   - Ci/Ck/Cm/Cl prefixes: Gemini direct API thinking signatures (Field 1, 0x0a)
+//   - ZT prefix: Gemini tool call signatures (Base64-encoded UUID v4)
+//   - E prefix: decode Base64, parse protobuf Field 2 → Field 1 length:
+//     F1 ∈ [60,100] bytes → Claude (ECDSA-P256 signing block, 70 or 72 bytes)
+//     F1 > 100 bytes → Gemini-on-antigravity (different signing structure)
+//   - R prefix: 2-layer Base64 (Google Vertex direct), inner starts with E → Claude
+//
+// Supports optional "{modelGroup}#" prefix (stripped before analysis).
+func detectSignatureType(rawSignature string) string {
+	sig := rawSignature
+	if idx := strings.Index(sig, "#"); idx != -1 {
+		sig = sig[idx+1:]
+	}
+	if len(sig) < 20 {
+		return ""
 	}
 
-	// E... (Anthropic, 1-layer) -> Base64 encode to 2-layer
-	if strings.HasPrefix(rawSignature, "E") {
-		return base64.StdEncoding.EncodeToString([]byte(rawSignature))
+	// Gemini direct API: Ci/Ck/Cm/Cl (thinking) or ZT (tool call)
+	if strings.HasPrefix(sig, "Ci") || strings.HasPrefix(sig, "Ck") ||
+		strings.HasPrefix(sig, "Cm") || strings.HasPrefix(sig, "Cl") ||
+		strings.HasPrefix(sig, "ZT") {
+		return "gemini"
 	}
 
-	// R... (Vertex, 2-layer) or other formats -> return as-is
-	return rawSignature
+	// R prefix: 2-layer Base64 (Google Vertex direct)
+	// Decode outer layer and validate inner E-prefix with protobuf check
+	if strings.HasPrefix(sig, "R") {
+		firstLayer, err := base64.StdEncoding.DecodeString(sig)
+		if err != nil || len(firstLayer) == 0 || firstLayer[0] != 'E' {
+			return ""
+		}
+		return classifyEPrefixSignature(string(firstLayer))
+	}
+
+	// E prefix: could be Claude or Gemini-on-antigravity
+	// Distinguish by protobuf Field 1 (signing block) length:
+	//   Claude: 70-72 bytes (ECDSA-P256 + channel/backend metadata)
+	//   Gemini-on-antigravity: 1000+ bytes (completely different structure)
+	if strings.HasPrefix(sig, "E") {
+		return classifyEPrefixSignature(sig)
+	}
+
+	return ""
 }
 
-// isValidClaudeSignature validates Claude signature format in bypass mode.
-// Claude signatures have the following characteristics:
-//   - Start with "E" (1-layer Base64) or "R" (2-layer Base64)
-//   - After decoding all Base64 layers, the first byte must be 0x12 (Protobuf Field 2 tag)
-//
-// Signature block byte patterns (after full decode):
-//   - Max subscription: 08 0c 18 02 (Channel=12)
-//   - Anthropic API/Azure: 08 0b 18 02 (Channel=11)
-//   - AWS Bedrock: 08 0b 10 01 18 02 (Channel=11, Field2=1)
-//   - Google Vertex: 08 0b 10 02 18 02 (Channel=11, Field2=2)
-func isValidClaudeSignature(rawSignature string) bool {
-	if rawSignature == "" {
-		return false
+// classifyEPrefixSignature decodes an E-prefix Base64 signature and inspects
+// the protobuf Field 1 (signing block) length to distinguish Claude from
+// Gemini-on-antigravity signatures.
+func classifyEPrefixSignature(sig string) string {
+	decoded, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil || len(decoded) < 6 {
+		return ""
 	}
+	if decoded[0] != 0x12 {
+		return ""
+	}
+	// Skip Field 2 varint length
+	offset := 1
+	for offset < len(decoded) && offset < 6 {
+		if decoded[offset]&0x80 == 0 {
+			offset++
+			break
+		}
+		offset++
+	}
+	// Expect Field 1 tag (0x0A)
+	if offset >= len(decoded) || decoded[offset] != 0x0A {
+		return ""
+	}
+	offset++
+	// Read Field 1 varint length
+	f1Len := 0
+	shift := uint(0)
+	for i := 0; i < 4 && offset+i < len(decoded); i++ {
+		b := decoded[offset+i]
+		f1Len |= int(b&0x7F) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+	}
+	if f1Len >= 60 && f1Len <= 100 {
+		return "claude"
+	}
+	if f1Len > 100 {
+		return "gemini"
+	}
+	return ""
+}
 
-	// Extract signature if it has "xxx#" prefix
+// normalizeSignatureForModel converts a signature to the format expected by the target model
+// on Antigravity. Used in bypass mode.
+//
+// For Claude models: E... -> base64(E...) (2-layer), R... -> as-is
+// For Gemini models: pass through without modification
+func normalizeSignatureForModel(rawSignature, modelName string) string {
 	sig := rawSignature
 	if idx := strings.Index(sig, "#"); idx != -1 {
 		sig = sig[idx+1:]
 	}
 
-	if sig == "" {
-		return false
-	}
-
-	// Minimum length check (Claude signatures are substantial)
-	if len(sig) < 50 {
-		return false
-	}
-
-	// Decode to get the raw Protobuf bytes
-	var decoded []byte
-
-	if strings.HasPrefix(sig, "R") {
-		// R... (2-layer Base64): decode twice
-		firstLayer, err := base64.StdEncoding.DecodeString(sig)
-		if err != nil {
-			return false
+	if cache.GetModelGroup(modelName) == "claude" {
+		if strings.HasPrefix(sig, "E") {
+			return base64.StdEncoding.EncodeToString([]byte(sig))
 		}
-		// First layer should give us E... format
-		if len(firstLayer) == 0 || firstLayer[0] != 'E' {
-			return false
-		}
-		var decodeErr error
-		decoded, decodeErr = base64.StdEncoding.DecodeString(string(firstLayer))
-		if decodeErr != nil {
-			return false
-		}
-	} else if strings.HasPrefix(sig, "E") {
-		// E... (1-layer Base64): decode once
-		var err error
-		decoded, err = base64.StdEncoding.DecodeString(sig)
-		if err != nil {
-			return false
-		}
-	} else {
-		// Unknown format
-		return false
+		return sig
 	}
 
-	// Check Protobuf structure: first byte must be 0x12 (Field 2, wire type 2)
-	if len(decoded) < 4 {
-		return false
-	}
-	if decoded[0] != 0x12 {
-		return false
-	}
-
-	return true
+	return sig
 }

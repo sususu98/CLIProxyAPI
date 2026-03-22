@@ -245,6 +245,12 @@ func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 						"input": "{\"location\": \"Paris\"}"
 					}
 				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}
+				]
 			}
 		]
 	}`)
@@ -300,6 +306,12 @@ func TestConvertClaudeRequestToAntigravity_ToolUse_WithSignature(t *testing.T) {
 						"name": "get_weather",
 						"input": "{\"location\": \"Paris\"}"
 					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_123", "content": "Sunny"}
 				]
 			}
 		]
@@ -1420,7 +1432,7 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 func TestNormalizeSignature_CLIProxyAPIFormat(t *testing.T) {
 	// "claude#..." format should extract the signature after "#"
 	sig := "claude#R1234567890abcdef1234567890abcdef1234567890abcdef12"
-	result := normalizeSignature(sig)
+	result := normalizeSignatureForModel(sig, "claude-sonnet-4-5")
 
 	expected := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
 	if result != expected {
@@ -1431,7 +1443,7 @@ func TestNormalizeSignature_CLIProxyAPIFormat(t *testing.T) {
 func TestNormalizeSignature_GeminiFormat(t *testing.T) {
 	// "gemini#..." format should extract the signature after "#"
 	sig := "gemini#R1234567890abcdef1234567890abcdef1234567890abcdef12"
-	result := normalizeSignature(sig)
+	result := normalizeSignatureForModel(sig, "gemini-1.5-pro")
 
 	expected := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
 	if result != expected {
@@ -1444,7 +1456,7 @@ func TestNormalizeSignature_AnthropicFormat(t *testing.T) {
 	// Should be Base64 encoded to 2-layer format (no prefix)
 	sig := "EjIxMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMg=="
 
-	result := normalizeSignature(sig)
+	result := normalizeSignatureForModel(sig, "claude-sonnet-4-5")
 
 	// Result should start with "R" (Base64 of "E" starts with "R")
 	if !strings.HasPrefix(result, "R") {
@@ -1460,7 +1472,7 @@ func TestNormalizeSignature_GoogleVertexFormat(t *testing.T) {
 	// "R..." format (Google Vertex, 2-layer Base64)
 	// Should return as-is (already correct format)
 	sig := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
-	result := normalizeSignature(sig)
+	result := normalizeSignatureForModel(sig, "claude-sonnet-4-5")
 
 	if result != sig {
 		t.Errorf("Expected '%s', got '%s'", sig, result)
@@ -1476,7 +1488,7 @@ func TestNormalizeSignature_UnknownFormat(t *testing.T) {
 	}
 
 	for _, sig := range testCases {
-		result := normalizeSignature(sig)
+		result := normalizeSignatureForModel(sig, "claude-sonnet-4-5")
 		if result != sig {
 			t.Errorf("Expected '%s' (same as input), got '%s'", sig, result)
 		}
@@ -1485,7 +1497,7 @@ func TestNormalizeSignature_UnknownFormat(t *testing.T) {
 
 func TestNormalizeSignature_EmptyString(t *testing.T) {
 	// Empty string should return empty
-	result := normalizeSignature("")
+	result := normalizeSignatureForModel("", "claude-sonnet-4-5")
 	if result != "" {
 		t.Errorf("Expected empty for empty input, got '%s'", result)
 	}
@@ -1494,7 +1506,7 @@ func TestNormalizeSignature_EmptyString(t *testing.T) {
 func TestNormalizeSignature_CLIProxyAPIFormat_EmptyAfterPrefix(t *testing.T) {
 	// "claude#" with nothing after should extract empty string
 	sig := "claude#"
-	result := normalizeSignature(sig)
+	result := normalizeSignatureForModel(sig, "claude-sonnet-4-5")
 
 	if result != "" {
 		t.Errorf("Expected empty string, got '%s'", result)
@@ -1505,7 +1517,7 @@ func TestNormalizeSignature_RoundTrip_AnthropicToGoogle(t *testing.T) {
 	// Simulate: Anthropic returns E... -> we encode -> result starts with R
 	anthropicSig := "EtgCCkgICxACGAIqQGF8Wm8HDPN/PnZe6Mv5SGcFreSRLSo8/i5qfxfx7dOxRoZGOQ"
 
-	result := normalizeSignature(anthropicSig)
+	result := normalizeSignatureForModel(anthropicSig, "claude-sonnet-4-5")
 
 	// Result should start with R (base64 of 'E' = 0x45 = 69)
 	// base64("E") = "RQ==" so base64("Etg...") starts with "R"
@@ -1593,6 +1605,12 @@ func TestConvertClaudeRequestToAntigravity_ToolUseInheritsSignature(t *testing.T
 				"content": [
 					{"type": "thinking", "thinking": "Let me use a tool...", "signature": "` + validSig + `"},
 					{"type": "tool_use", "id": "tool_123", "name": "test_tool", "input": {"arg": "value"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "tool_123", "content": "result"}
 				]
 			}
 		]
@@ -1715,109 +1733,115 @@ func TestConvertClaudeRequestToAntigravity_CacheDisabled_NormalizesAnthropicSign
 }
 
 // ============================================================================
-// isValidClaudeSignature Tests
+// detectSignatureType Tests
 // ============================================================================
 
-func TestIsValidClaudeSignature_ValidAnthropicMaxFormat(t *testing.T) {
-	// Valid Max subscription: 0x12 prefix, Channel=12
+func TestDetectSignatureType_ClaudeAnthropicMax(t *testing.T) {
 	sig := "EoYDCkYIDBgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	if !isValidClaudeSignature(sig) {
-		t.Error("Valid Anthropic Max signature should pass validation")
+	if got := detectSignatureType(sig); got != "claude" {
+		t.Errorf("Anthropic Max sig: want claude, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_ValidAnthropicAPIFormat(t *testing.T) {
-	// Valid API: 0x12 prefix, Channel=11
+func TestDetectSignatureType_ClaudeAnthropicAPI(t *testing.T) {
 	sig := "EoUICkYICxgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	if !isValidClaudeSignature(sig) {
-		t.Error("Valid Anthropic API signature should pass validation")
+	if got := detectSignatureType(sig); got != "claude" {
+		t.Errorf("Anthropic API sig: want claude, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_ValidAWSBedrockFormat(t *testing.T) {
-	// Valid AWS Bedrock: 0x12 prefix, Channel=11, Field2=1
+func TestDetectSignatureType_ClaudeAWSBedrock(t *testing.T) {
 	sig := "Et0DCkgICxABGAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-	if !isValidClaudeSignature(sig) {
-		t.Error("Valid AWS Bedrock signature should pass validation")
+	if got := detectSignatureType(sig); got != "claude" {
+		t.Errorf("AWS Bedrock sig: want claude, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_ValidGoogleVertexFormat(t *testing.T) {
-	// Valid Google Vertex: 0x12 prefix, Channel=11, Field2=2
+func TestDetectSignatureType_ClaudeGoogleVertex(t *testing.T) {
 	sig := "EpUMCkgICxACGAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-	if !isValidClaudeSignature(sig) {
-		t.Error("Valid Google Vertex 1-layer signature should pass validation")
+	if got := detectSignatureType(sig); got != "claude" {
+		t.Errorf("Google Vertex sig: want claude, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_ValidVertexTwoLayerFormat(t *testing.T) {
-	// Valid 2-layer: R... that decodes to E... which decodes to 0x12 prefix
+func TestDetectSignatureType_ClaudeVertexTwoLayer(t *testing.T) {
 	innerSig := "EpUMCkgICxACGAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
 	twoLayerSig := base64.StdEncoding.EncodeToString([]byte(innerSig))
 
 	if !strings.HasPrefix(twoLayerSig, "R") {
-		t.Fatalf("Test setup error: 2-layer signature should start with R, got %c", twoLayerSig[0])
+		t.Fatalf("Test setup: 2-layer sig should start with R, got %c", twoLayerSig[0])
 	}
 
-	if !isValidClaudeSignature(twoLayerSig) {
-		t.Error("Valid 2-layer Vertex signature should pass validation")
+	if got := detectSignatureType(twoLayerSig); got != "claude" {
+		t.Errorf("Vertex 2-layer sig: want claude, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_WithCLIProxyAPIPrefix(t *testing.T) {
-	// Valid signature with "claude#" prefix
+func TestDetectSignatureType_WithModelGroupPrefix(t *testing.T) {
 	innerSig := "EoYDCkYIDBgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	sig := "claude#" + innerSig
 
-	if !isValidClaudeSignature(sig) {
-		t.Error("Valid signature with 'claude#' prefix should pass validation")
+	if got := detectSignatureType(sig); got != "claude" {
+		t.Errorf("Sig with 'claude#' prefix: want claude, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_InvalidEmptyString(t *testing.T) {
-	if isValidClaudeSignature("") {
-		t.Error("Empty signature should fail validation")
+func TestDetectSignatureType_GeminiDirectAPI(t *testing.T) {
+	for _, prefix := range []string{"CiQBjz1rX4u3/8uTA/zp8Ev0m", "CkQBjz1rX4u3/8uTA/zp8Ev0m", "CmUBjz1rX4u3/8uTA/zp8Ev0m", "ClUBjz1rX4u3/8uTA/zp8Ev0m"} {
+		if got := detectSignatureType(prefix); got != "gemini" {
+			t.Errorf("Gemini prefix %q: want gemini, got %q", prefix[:2], got)
+		}
 	}
 }
 
-func TestIsValidClaudeSignature_InvalidTooShort(t *testing.T) {
-	if isValidClaudeSignature("EoAB") {
-		t.Error("Short signature should fail validation")
+func TestDetectSignatureType_GeminiToolCall(t *testing.T) {
+	sig := "ZTI0ODMwYTctNWNkNi00MmZlLTk5OGItZWU1MzllNzJiOWMz"
+	if got := detectSignatureType(sig); got != "gemini" {
+		t.Errorf("Gemini tool call sig: want gemini, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_InvalidWrongPrefix(t *testing.T) {
-	// Does not start with E or R
+func TestDetectSignatureType_Empty(t *testing.T) {
+	if got := detectSignatureType(""); got != "" {
+		t.Errorf("Empty sig: want empty, got %q", got)
+	}
+}
+
+func TestDetectSignatureType_TooShort(t *testing.T) {
+	if got := detectSignatureType("EoAB"); got != "" {
+		t.Errorf("Short sig: want empty, got %q", got)
+	}
+}
+
+func TestDetectSignatureType_InvalidPrefix(t *testing.T) {
 	sig := "XoYDCkYIDBgCKkCTiMT2RGJPOfSxH3FmzDTRRwVQ5C2l8QHba5Ukg"
-	if isValidClaudeSignature(sig) {
-		t.Error("Signature with wrong prefix should fail validation")
+	if got := detectSignatureType(sig); got != "" {
+		t.Errorf("Invalid prefix sig: want empty, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_InvalidProtobufStructure(t *testing.T) {
-	// Valid Base64 but wrong first byte (not 0x12)
-	// base64("ABC...") = first byte is 'A' = 0x41, not 0x12
-	sig := "QUJDREVGMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MA=="
-	if isValidClaudeSignature(sig) {
-		t.Error("Signature with wrong Protobuf structure should fail validation")
-	}
-}
-
-func TestIsValidClaudeSignature_InvalidBase64(t *testing.T) {
-	// E prefix but invalid Base64 content
+func TestDetectSignatureType_InvalidBase64(t *testing.T) {
 	sig := "E!!!invalidbase64!!!1234567890123456789012345678901234567890"
-	if isValidClaudeSignature(sig) {
-		t.Error("Invalid Base64 signature should fail validation")
+	if got := detectSignatureType(sig); got != "" {
+		t.Errorf("Invalid base64 sig: want empty, got %q", got)
 	}
 }
 
-func TestIsValidClaudeSignature_InvalidTwoLayerFirstLayerNotE(t *testing.T) {
-	// R... but first layer doesn't decode to E...
+func TestDetectSignatureType_InvalidTwoLayerInner(t *testing.T) {
 	innerContent := "XYZnotEformat123456789012345678901234567890123456"
 	twoLayerSig := base64.StdEncoding.EncodeToString([]byte(innerContent))
+	if got := detectSignatureType(twoLayerSig); got != "" {
+		t.Errorf("Invalid 2-layer inner: want empty, got %q", got)
+	}
+}
 
-	if isValidClaudeSignature(twoLayerSig) {
-		t.Error("2-layer signature with invalid inner format should fail validation")
+func TestDetectSignatureType_GeminiOnAntigravity(t *testing.T) {
+	// Gemini-on-antigravity: E prefix but Field 1 length >> 100 bytes
+	// Simulated: 0x12 (F2 tag) + varint(1137) + 0x0A (F1 tag) + varint(1134) + data
+	// F1 = 1134 bytes → detected as "gemini"
+	sig := "EvEICu4IAb4+9vsOw0l/NwdTUmYrcZXbHX3XOClhAO1dn6vNGm3Ql1mMOuxoyfLJNWmi5/CBvCnZhGpoCc+cze47MMzEGGTmYMHz5klpr7sfSXDMVId0V5PLcklkTYvDTyEF8E6NAJMw5wJg1Ry6zQbG35c6otz7v2LtaNFg6QGUFgpUJuj/69OPlUSuHE4zlxkr1f3BXJ3FPe/scM9hg6xABXhz2BiR0n457/XNs7CI8pJATQHmBfg93PUhJMjaBx808JFxVd8C+2M8VlUk+oWVhxoWurLw+sA9/ZWGVpeV5rY2N1KOM7+e9Pt7Qdexn/rOVPWgkfYg8hYCyH5kWdB+reY0nH3aTCBvog+dlumGxL8A8kbwKvcIXgcD0x6DLVdcTCK4IKRXdKETEJd7afAjMOXXI66Jm1C/xRgtkKM9jsWYIYHUrAQcgwopIeR1eDK8djhRn67TEyWcGtAG5EBqVfTthMXO3zZLvxOJCaylSL4ahxXVc43YZEqvnjz9NYX2go+rvqCPiJb3/fK1YEOPMQN1qS9CV2wbVL+3Lpf9Gzgh86S9WvYJ4SqvYTR6cOjuJYgb/CSu5luOX8SCWI92xxNmANyXP/akBSMIBnKgKyFxoi4DYxAe7DiGyGJpaElZFwv1powxtT6kbCh6VPbrJLsCKfP0DJ574RnWRU3TNYx6NeYVV87tpNOL6QNdFyZ1k281xbOAH7pexG6fyw07ZsnDoW2c+4C6Nn/Un/SrGVX+ukixe6kRr8GaHhwzgjnsMpuP0gw4IwQU8OD/aqCOFTqwYLxUQpRJTHWB0ilKgSAWfv+fyM3MavNr/HULWMu6oj6yDWYf+Tn5enWfZq5Mnm+pNSKkKKuX+XDXZCSx7bk8okneJqunheMqVrJxXzLTww+63GhLPCzBNF4x7vpnUdmBZRMFBgowguryJU8G9CBW38cvKhwdquxXwo0geAIXWbKt7Z5eFhkT/RHi2s2JNN7Fb3Ei8Z1ez8IS5uS6/2qZ/vDHTUKLa5PTvTodScuxolIX+IuJhAhLORYNQiuPdQeA33D8MatxyXBXl+UhaqBUDTeLRrZlIPWNxqGVS4xUmZAOvtLV22mZxu6HoBFGXf+5R7xobw7EUgvx5V+vDz8vRJT8WFONq7DeG9UeqsVu5emjwY+pg+9ElwqLRkTswbL1mTXdSt8bLidCBzZcLQxkLKDvcTKCqAvjIA9l8h9lQXFIkOE6/JY0Z+zqmqEgXmDotUr/zp+0O/JmhM3lNn/zH4Jk+Mgj6DB+Ud7hUv+pi4ekq5BfgcCHyKasvMIohIW65Y+fjjgfT1lCEFoBWFUKT3utt8hXC86j17SUp1F9PRnA/E4MJpekHWv7ExnU5kZ0/4rQVptCLr7zA5jWK7pdKeZVMG7Bymz/dqChfFiaqoCoQBXu5MAWpqvjE6z6c//YqvJ9CvlCA8kthZEMbSujjoUQUxA5Z2WkWUM8RCDIgTd5mLPRVZ02hb4KqHmdFrACFf4g4pzzIF4c7+jdtf17"
+	if got := detectSignatureType(sig); got != "gemini" {
+		t.Errorf("Gemini-on-antigravity sig: want gemini, got %q", got)
 	}
 }
 
@@ -2035,5 +2059,74 @@ func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_NoTools_NoHint(t *te
 				t.Error("Hint should NOT be injected when only adaptive thinking is present (no tools)")
 			}
 		}
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_OrphanToolUseSkipped(t *testing.T) {
+	inputJSON := []byte(`{
+        "model": "claude-opus-4-6",
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Hello"}]
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I will use a tool."},
+                    {"type": "tool_use", "id": "orphan_001", "name": "read_file", "input": {"path": "test.txt"}}
+                ]
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Continue without that tool result"}]
+            }
+        ]
+    }`)
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.1.parts").Array()
+	for _, p := range parts {
+		if p.Get("functionCall").Exists() {
+			t.Errorf("Orphan tool_use should have been pruned, but found functionCall: %s", p.Get("functionCall.name").String())
+		}
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ResolvedToolUseKept(t *testing.T) {
+	inputJSON := []byte(`{
+        "model": "claude-opus-4-6",
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Hello"}]
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "resolved_001", "name": "read_file", "input": {"path": "test.txt"}}
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "resolved_001", "content": "file contents here"}
+                ]
+            }
+        ]
+    }`)
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.1.parts").Array()
+	found := false
+	for _, p := range parts {
+		if p.Get("functionCall.name").String() == "read_file" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Resolved tool_use should be kept, but functionCall not found")
 	}
 }

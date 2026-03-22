@@ -1248,3 +1248,46 @@ func TestCleanJSONSchema_CacheConsistency(t *testing.T) {
 		t.Log("Note: Antigravity and Gemini results are identical for this input (may be expected)")
 	}
 }
+
+func TestCleanJSONSchemaForAntigravity_UnknownFieldsRemoved(t *testing.T) {
+	input := `{"type":"object","properties":{"source":{"type":"string","fmp":"bad","tiingo":"bad","description":"The source"}}}`
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if gjson.Get(result, "properties.source.fmp").Exists() {
+		t.Errorf("fmp field should be removed")
+	}
+	if gjson.Get(result, "properties.source.tiingo").Exists() {
+		t.Errorf("tiingo field should be removed")
+	}
+
+	if gjson.Get(result, "properties.source.type").String() != "string" {
+		t.Errorf("type field should be preserved")
+	}
+	if gjson.Get(result, "properties.source.description").String() != "The source" {
+		t.Errorf("description field should be preserved")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_PropertyNamesPreserved(t *testing.T) {
+	input := `{"type":"object","properties":{"fmp":{"type":"string"},"oecd":{"type":"number"}}}`
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if !gjson.Get(result, "properties.fmp").Exists() {
+		t.Errorf("property name 'fmp' should be preserved")
+	}
+	if !gjson.Get(result, "properties.oecd").Exists() {
+		t.Errorf("property name 'oecd' should be preserved")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_NestedUnknownFieldsRemoved(t *testing.T) {
+	input := `{"type":"object","properties":{"data":{"type":"object","properties":{"value":{"type":"number","fred":"bad","minimum":10}}}}}`
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if gjson.Get(result, "properties.data.properties.value.fred").Exists() {
+		t.Errorf("nested unknown field 'fred' should be removed")
+	}
+	if !gjson.Get(result, "properties.data.properties.value.minimum").Exists() {
+		t.Errorf("nested valid field 'minimum' should be preserved")
+	}
+}
