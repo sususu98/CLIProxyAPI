@@ -481,10 +481,9 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format) - highest priority
 //  2. X-Session-ID header
-//  3. Idempotency-Key from metadata
-//  4. metadata.user_id (non-Claude Code format)
-//  5. conversation_id field
-//  6. Hash-based fallback from messages
+//  3. metadata.user_id (non-Claude Code format)
+//  4. conversation_id field
+//  5. Hash-based fallback from messages
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
