@@ -8,8 +8,8 @@ package gemini
 import (
 	"bytes"
 	"context"
-	"fmt"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -29,47 +29,36 @@ import (
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
-//   - []string: The transformed request data in Gemini API format
-func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []string {
+//   - [][]byte: The transformed request data in Gemini API format
+func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	// Default to SSE format (alt="") if alt is not set in context
-	alt, _ := ctx.Value("alt").(string)
-
-	var chunk []byte
-	if alt == "" {
-		responseResult := gjson.GetBytes(rawJSON, "response")
-		if responseResult.Exists() {
-			chunk = []byte(responseResult.Raw)
-		} else if gjson.GetBytes(rawJSON, "candidates").Exists() {
-			// Fallback: if no "response" wrapper but has "candidates", use rawJSON directly
-			chunk = rawJSON
-		}
-	} else {
-		chunkTemplate := "[]"
-		responseResult := gjson.ParseBytes(rawJSON)
-		if responseResult.IsArray() {
-			responseResultItems := responseResult.Array()
-			for i := 0; i < len(responseResultItems); i++ {
-				responseResultItem := responseResultItems[i]
-				if responseResultItem.Get("response").Exists() {
-					chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Get("response").Raw)
-				} else if responseResultItem.Get("candidates").Exists() {
-					// Fallback: if no "response" wrapper but has "candidates", use item directly
-					chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Raw)
+	if alt, ok := ctx.Value("alt").(string); ok {
+		var chunk []byte
+		if alt == "" {
+			responseResult := gjson.GetBytes(rawJSON, "response")
+			if responseResult.Exists() {
+				chunk = []byte(responseResult.Raw)
+			}
+		} else {
+			chunkTemplate := []byte(`[]`)
+			responseResult := gjson.ParseBytes(chunk)
+			if responseResult.IsArray() {
+				responseResultItems := responseResult.Array()
+				for i := 0; i < len(responseResultItems); i++ {
+					responseResultItem := responseResultItems[i]
+					if responseResultItem.Get("response").Exists() {
+						chunkTemplate, _ = sjson.SetRawBytes(chunkTemplate, "-1", []byte(responseResultItem.Get("response").Raw))
+					}
 				}
 			}
+			chunk = chunkTemplate
 		}
-		chunk = []byte(chunkTemplate)
+		return [][]byte{chunk}
 	}
-
-	// Return empty slice if no valid chunk was extracted
-	if len(chunk) == 0 {
-		return []string{}
-	}
-	return []string{string(chunk)}
+	return [][]byte{}
 }
 
 // ConvertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
@@ -83,15 +72,15 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalReq
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response containing the response data
-func ConvertGeminiCliResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+//   - []byte: A Gemini-compatible JSON response containing the response data
+func ConvertGeminiCliResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
-		return responseResult.Raw
+		return []byte(responseResult.Raw)
 	}
-	return string(rawJSON)
+	return rawJSON
 }
 
-func GeminiTokenCount(ctx context.Context, count int64) string {
-	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+func GeminiTokenCount(ctx context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

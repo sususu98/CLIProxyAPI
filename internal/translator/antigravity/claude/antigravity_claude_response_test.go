@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -283,7 +284,7 @@ func TestConvertAntigravityResponseToClaude_TextAndSignatureInSameChunk(t *testi
 	result1 := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
 	result2 := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
 
-	allOutput := strings.Join(result1, "") + strings.Join(result2, "")
+	allOutput := string(bytes.Join(result1, nil)) + string(bytes.Join(result2, nil))
 
 	// The text " Second part." must appear as a thinking_delta, not be silently dropped
 	if !strings.Contains(allOutput, "Second part.") {

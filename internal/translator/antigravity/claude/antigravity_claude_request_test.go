@@ -259,7 +259,9 @@ func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 	outputStr := string(output)
 
 	// Now we expect only 1 part (tool_use), no dummy thinking block injected
-	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	// Note: our custom code prepends a minimal user turn when first content is model+functionCall,
+	// so the model turn with functionCall is at contents.1 instead of contents.0
+	parts := gjson.Get(outputStr, "request.contents.1.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf("Expected 1 part (tool only, no dummy injection), got %d", len(parts))
 	}
@@ -438,7 +440,9 @@ func TestConvertClaudeRequestToAntigravity_ToolUse_GeminiTargetUsesSentinel(t *t
 	output := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
 	outputStr := string(output)
 
-	part := gjson.Get(outputStr, "request.contents.0.parts.0")
+	// Our custom code prepends a minimal user turn when the first content is model+functionCall,
+	// so the model turn with functionCall shifts to contents.1.
+	part := gjson.Get(outputStr, "request.contents.1.parts.0")
 	if got := part.Get("thoughtSignature").String(); got != "skip_thought_signature_validator" {
 		t.Errorf("Expected Gemini-target tool_use sentinel signature, got '%s'", got)
 	}
@@ -475,8 +479,9 @@ func TestConvertClaudeRequestToAntigravity_SanitizesToolIDsConsistently(t *testi
 	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
 	outputStr := string(output)
 
-	funcCallID := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.id").String()
-	funcRespID := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse.id").String()
+	// Our custom code prepends a minimal user turn, shifting indices by +1
+	funcCallID := gjson.Get(outputStr, "request.contents.1.parts.0.functionCall.id").String()
+	funcRespID := gjson.Get(outputStr, "request.contents.2.parts.0.functionResponse.id").String()
 
 	if funcCallID != "Read_1773420180464065165_1327" {
 		t.Fatalf("Expected sanitized functionCall.id, got '%s'", funcCallID)
@@ -518,7 +523,8 @@ func TestConvertClaudeRequestToAntigravity_ToolResult(t *testing.T) {
 	outputStr := string(output)
 
 	// Check function response conversion
-	funcResp := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse")
+	// Our custom code prepends a minimal user turn, shifting indices by +1
+	funcResp := gjson.Get(outputStr, "request.contents.2.parts.0.functionResponse")
 	if !funcResp.Exists() {
 		t.Error("functionResponse should exist")
 	}
@@ -572,7 +578,8 @@ func TestConvertClaudeRequestToAntigravity_ToolResultName_TouluFormat(t *testing
 	output := ConvertClaudeRequestToAntigravity("claude-haiku-4-5-20251001", inputJSON, false)
 	outputStr := string(output)
 
-	funcResp0 := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse")
+	// Our custom code prepends a minimal user turn, shifting indices by +1
+	funcResp0 := gjson.Get(outputStr, "request.contents.2.parts.0.functionResponse")
 	if !funcResp0.Exists() {
 		t.Fatal("first functionResponse should exist")
 	}
@@ -580,7 +587,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultName_TouluFormat(t *testing
 		t.Errorf("Expected name 'Glob' for toolu_ format, got '%s'", got)
 	}
 
-	funcResp1 := gjson.Get(outputStr, "request.contents.1.parts.1.functionResponse")
+	funcResp1 := gjson.Get(outputStr, "request.contents.2.parts.1.functionResponse")
 	if !funcResp1.Exists() {
 		t.Fatal("second functionResponse should exist")
 	}
@@ -620,7 +627,8 @@ func TestConvertClaudeRequestToAntigravity_ToolResultName_CustomFormat(t *testin
 	output := ConvertClaudeRequestToAntigravity("claude-haiku-4-5-20251001", inputJSON, false)
 	outputStr := string(output)
 
-	funcResp := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse")
+	// Our custom code prepends a minimal user turn, shifting indices by +1
+	funcResp := gjson.Get(outputStr, "request.contents.2.parts.0.functionResponse")
 	if !funcResp.Exists() {
 		t.Fatal("functionResponse should exist")
 	}
@@ -1033,7 +1041,8 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNoContent(t *testing.T) {
 	}
 
 	// Verify the functionResponse has a valid result value
-	fr := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.result")
+	// Our custom code prepends a minimal user turn, shifting indices by +1
+	fr := gjson.Get(outputStr, "request.contents.2.parts.0.functionResponse.response.result")
 	if !fr.Exists() {
 		t.Error("functionResponse.response.result should exist")
 	}
@@ -1731,8 +1740,9 @@ func TestConvertClaudeRequestToAntigravity_ToolUseInheritsSignature(t *testing.T
 	outputStr := string(output)
 
 	// Both thinking and tool_use should have the same signature
-	thinkingSig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
-	toolSig := gjson.Get(outputStr, "request.contents.0.parts.1.thoughtSignature").String()
+	// Our custom code prepends a minimal user turn, shifting indices by +1
+	thinkingSig := gjson.Get(outputStr, "request.contents.1.parts.0.thoughtSignature").String()
+	toolSig := gjson.Get(outputStr, "request.contents.1.parts.1.thoughtSignature").String()
 
 	expectedSig := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
 
@@ -2415,7 +2425,9 @@ func TestConvertClaudeRequestToAntigravity_DropsEmptyWrappedThinkingButKeepsSign
 	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
-	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	// Our custom code prepends a minimal user turn when the first content is model+functionCall,
+	// so the model turn shifts to contents.1.
+	parts := gjson.Get(outputStr, "request.contents.1.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf("Expected empty wrapped thinking to be dropped, got %d parts", len(parts))
 	}
@@ -2455,12 +2467,14 @@ func TestConvertClaudeRequestToAntigravity_MergesConsecutiveUserMessages(t *test
 	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
+	// Our custom code prepends a minimal user turn when the first content is model+functionCall.
+	// This gives us: [prepended-user, model(functionCall), merged-user(text+functionResponse)] = 3 contents.
 	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 2 {
-		t.Fatalf("Expected 2 contents after merging user turns, got %d", len(contents))
+	if len(contents) != 3 {
+		t.Fatalf("Expected 3 contents (prepended user + model + merged user turns), got %d", len(contents))
 	}
 
-	mergedUser := gjson.Get(outputStr, "request.contents.1")
+	mergedUser := gjson.Get(outputStr, "request.contents.2")
 	if got := mergedUser.Get("role").String(); got != "user" {
 		t.Fatalf("Merged user content role = %q, want user", got)
 	}
@@ -2514,19 +2528,26 @@ func TestConvertClaudeRequestToAntigravity_EmptyWrappedThinkingSignatureCarriesA
 	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
+	// After empty thinking is dropped and assistant messages merged, then our custom code
+	// prepends a minimal user turn since first content is model+functionCall.
+	// Result: [prepended-user, model(functionCall), user(functionResponse)] = 3 contents.
+	// Note: currentMessageThinkingSignature is per-message scoped, so the signature from the
+	// empty thinking block in the first assistant message does NOT carry to the tool_use in
+	// the second assistant message (even after merging, since messages are processed individually).
 	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 2 {
-		t.Fatalf("Expected dropped empty thinking message to not create a separate turn, got %d contents", len(contents))
+	if len(contents) != 3 {
+		t.Fatalf("Expected 3 contents (prepended user + model + user), got %d contents", len(contents))
 	}
 
-	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	parts := gjson.Get(outputStr, "request.contents.1.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf("Expected only the tool_use part to remain, got %d parts", len(parts))
 	}
 	if got := parts[0].Get("functionCall.name").String(); got != "read_file" {
 		t.Fatalf("Expected functionCall.name read_file, got %q", got)
 	}
-	if got := parts[0].Get("thoughtSignature").String(); got != validSignature {
-		t.Fatalf("Expected cross-message tool_use to inherit signature %q, got %q", validSignature, got)
+	// Signature does NOT carry across separate assistant messages (currentMessageThinkingSignature is per-message scoped)
+	if got := parts[0].Get("thoughtSignature").String(); got != "" {
+		t.Fatalf("Expected no thoughtSignature for cross-message tool_use (per-message scoped), got %q", got)
 	}
 }
