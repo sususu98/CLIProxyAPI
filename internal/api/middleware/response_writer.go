@@ -285,7 +285,8 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	hasRetryAttempts := upstreamAttemptCount > 1
 
 	forceLog := w.logOnErrorOnly && hasAPIError && hasUpstreamAPICall && !w.logger.IsEnabled()
-	if finalStatusCode == http.StatusInternalServerError && !forceLog && w.bodyContainsContextCanceled() {
+	// Context canceled (client disconnect) is never worth logging, even under forceLog.
+	if finalStatusCode == http.StatusInternalServerError && w.bodyContainsContextCanceled() {
 		return nil
 	}
 	if !w.logger.IsEnabled() && !forceLog {
