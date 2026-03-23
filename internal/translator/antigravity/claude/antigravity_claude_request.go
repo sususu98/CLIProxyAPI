@@ -207,12 +207,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
-	// lastKnownThinkingSignature persists across messages so that tool_use blocks
-	// in turns without a preceding thinking block can inherit the most recent valid signature.
-	// Without this, such tool_use blocks would get the sentinel value which Antigravity rejects
-	// as "Corrupted thought signature".
-	var lastKnownThinkingSignature string
-
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 		numMessages := len(messageResults)
@@ -271,7 +265,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							// Store for subsequent tool_use in the same message and across messages
 							if cache.HasValidSignature(modelName, signature) {
 								currentMessageThinkingSignature = signature
-								lastKnownThinkingSignature = signature
 							}
 
 							// Skip unsigned thinking blocks when cache is enabled
@@ -293,7 +286,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								if sigType != "" && sigType == modelGroup {
 									signature = normalizeSignatureForModel(rawSig, modelName)
 									currentMessageThinkingSignature = signature
-									lastKnownThinkingSignature = signature
 								}
 							}
 							if signature == "" {
@@ -365,12 +357,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if argsRaw != "" {
 							partJSON := `{}`
 
-							// Attach signature for tool calls
+							// Attach signature for tool calls — only from current message's thinking block
 							if cache.SignatureCacheEnabled() {
 								if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
 									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", currentMessageThinkingSignature)
-								} else if cache.HasValidSignature(modelName, lastKnownThinkingSignature) {
-									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", lastKnownThinkingSignature)
 								} else if !targetIsClaude {
 									const skipSentinel = "skip_thought_signature_validator"
 									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", skipSentinel)
@@ -378,8 +368,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							} else {
 								if currentMessageThinkingSignature != "" {
 									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", currentMessageThinkingSignature)
-								} else if lastKnownThinkingSignature != "" {
-									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", lastKnownThinkingSignature)
 								} else if !targetIsClaude {
 									const skipSentinel = "skip_thought_signature_validator"
 									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", skipSentinel)
