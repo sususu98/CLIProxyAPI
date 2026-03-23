@@ -285,6 +285,9 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	hasRetryAttempts := upstreamAttemptCount > 1
 
 	forceLog := w.logOnErrorOnly && hasAPIError && hasUpstreamAPICall && !w.logger.IsEnabled()
+	if finalStatusCode == http.StatusInternalServerError && !forceLog && w.bodyContainsContextCanceled() {
+		return nil
+	}
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
@@ -415,6 +418,12 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 		return w.requestInfo.Body
 	}
 	return nil
+}
+
+var contextCanceledBytes = []byte("context canceled")
+
+func (w *ResponseWriterWrapper) bodyContainsContextCanceled() bool {
+	return w.body != nil && bytes.Contains(w.body.Bytes(), contextCanceledBytes)
 }
 
 func (w *ResponseWriterWrapper) countUpstreamAttempts(c *gin.Context) int {
