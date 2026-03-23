@@ -161,6 +161,27 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
 						// log.Debug("Branch: signature_delta")
 
+						// Flush co-located text before emitting the signature
+						if partText := partTextResult.String(); partText != "" {
+							if params.ResponseType != 2 {
+								if params.ResponseType != 0 {
+									output = output + "event: content_block_stop\n"
+									output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+									output = output + "\n\n\n"
+									params.ResponseIndex++
+								}
+								output = output + "event: content_block_start\n"
+								output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex)
+								output = output + "\n\n\n"
+								params.ResponseType = 2
+								params.CurrentThinkingText.Reset()
+							}
+							params.CurrentThinkingText.WriteString(partText)
+							output = output + "event: content_block_delta\n"
+							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partText)
+							output = output + fmt.Sprintf("data: %s\n\n\n", data)
+						}
+
 						if params.CurrentThinkingText.Len() > 0 {
 							cache.CacheSignature(modelName, params.CurrentThinkingText.String(), thoughtSignature.String())
 							// log.Debugf("Cached signature for thinking block (textLen=%d)", params.CurrentThinkingText.Len())
