@@ -359,6 +359,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
+	if strings.Contains(strings.ToLower(baseModel), "claude") {
+		if prefillErr := rejectClaudePrefill(translated); prefillErr != nil {
+			return resp, prefillErr
+		}
+	}
+
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
@@ -896,6 +902,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+
+	if isClaude {
+		if prefillErr := rejectClaudePrefill(translated); prefillErr != nil {
+			return nil, prefillErr
+		}
+	}
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -1613,6 +1625,27 @@ func resolveUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
 		ua = cfg.AntigravityUserAgents
 	}
 	return ua.ResolveAPIAgent()
+}
+
+// rejectClaudePrefill returns an error if the translated payload ends with an
+// assistant ("model") message. Claude thinking models do not support assistant
+// message prefill — the conversation must end with a user message.
+func rejectClaudePrefill(translated []byte) error {
+	contents := gjson.GetBytes(translated, "request.contents")
+	if !contents.IsArray() {
+		return nil
+	}
+	arr := contents.Array()
+	if len(arr) == 0 {
+		return nil
+	}
+	if arr[len(arr)-1].Get("role").String() == "model" {
+		return statusErr{
+			code: http.StatusBadRequest,
+			msg:  `{"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."}}`,
+		}
+	}
+	return nil
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
