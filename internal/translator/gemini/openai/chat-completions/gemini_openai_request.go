@@ -257,7 +257,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							continue
 						}
 						fid := tc.Get("id").String()
-						fname := tc.Get("function.name").String()
+						fname := util.SanitizeFunctionName(tc.Get("function.name").String())
 						fargs := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", util.SanitizeFunctionName(fname))
 						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
@@ -341,6 +341,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 						fnRaw = string(fnRawBytes)
 					}
+					fnRawBytes := []byte(fnRaw)
+					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.SanitizeFunctionName(fn.Get("name").String()))
+					fnRaw = string(fnRawBytes)
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
 					fnRaw, _ = sjson.Set(fnRaw, "name", util.SanitizeFunctionName(gjson.Get(fnRaw, "name").String()))
 					if !hasFunction {

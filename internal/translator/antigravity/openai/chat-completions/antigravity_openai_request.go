@@ -297,7 +297,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							continue
 						}
 						fid := tc.Get("id").String()
-						fname := tc.Get("function.name").String()
+						fname := util.SanitizeFunctionName(tc.Get("function.name").String())
 						fargs := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.id", fid)
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", util.SanitizeFunctionName(fname))
@@ -395,8 +395,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						fnRaw = string(fnRawBytes)
 					}
+					fnRaw, _ = sjson.Set(fnRaw, "name", util.SanitizeFunctionName(fn.Get("name").String()))
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
-					fnRaw, _ = sjson.Set(fnRaw, "name", util.SanitizeFunctionName(gjson.Get(fnRaw, "name").String()))
 					if !hasFunction {
 						functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))
 					}

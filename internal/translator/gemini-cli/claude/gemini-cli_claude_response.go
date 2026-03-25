@@ -30,7 +30,6 @@ type Params struct {
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
-	// Populated lazily on the first response chunk from the original request JSON.
 	ToolNameMap map[string]string
 }
 
@@ -253,7 +252,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 // Returns:
 //   - []byte: A Claude-compatible JSON response.
 func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	_ = originalRequestRawJSON
+	toolNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
@@ -311,7 +310,7 @@ func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, orig
 				flushText()
 				hasToolCall = true
 
-				name := functionCall.Get("name").String()
+				name := util.RestoreSanitizedToolName(toolNameMap, functionCall.Get("name").String())
 				toolIDCounter++
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolBlock, _ = sjson.SetBytes(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
