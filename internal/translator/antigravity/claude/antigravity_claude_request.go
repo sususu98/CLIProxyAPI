@@ -383,6 +383,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
+
 						sanitizedToolCallID := toolCallID
 						if sanitizedID, ok := sanitizedToolIDByOriginal[toolCallID]; ok {
 							sanitizedToolCallID = sanitizedID
