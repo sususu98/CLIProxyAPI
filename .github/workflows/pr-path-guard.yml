@@ -7,6 +7,9 @@ on:
       - synchronize
       - reopened
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   ensure-no-translator-changes:
     runs-on: ubuntu-latest
