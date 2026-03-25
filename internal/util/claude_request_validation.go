@@ -54,7 +54,122 @@ func ValidateClaudeMessagesRequest(rawJSON []byte) *ClaudeRequestValidationError
 		}
 	}
 
+	if err := validateClaudeToolResultAdjacency(messageArray); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func validateClaudeToolResultAdjacency(messageArray []gjson.Result) *ClaudeRequestValidationError {
+	for i, msg := range messageArray {
+		contentResult := msg.Get("content")
+		if !contentResult.IsArray() {
+			continue
+		}
+
+		requiredIDs, requiredIDSet, err := collectClaudeToolUseIDs(i, contentResult.Array())
+		if err != nil {
+			return err
+		}
+		if len(requiredIDs) == 0 {
+			continue
+		}
+
+		if i+1 >= len(messageArray) {
+			return missingClaudeToolResultError(i, requiredIDs)
+		}
+
+		if strings.TrimSpace(messageArray[i+1].Get("role").String()) != "user" {
+			return &ClaudeRequestValidationError{Message: fmt.Sprintf("messages.%d.role: tool_result blocks must be provided in the next user message after tool_use", i+1)}
+		}
+
+		nextContentResult := messageArray[i+1].Get("content")
+		if !nextContentResult.IsArray() {
+			return missingClaudeToolResultError(i, requiredIDs)
+		}
+
+		toolResultIDs, err := collectClaudeToolResultIDs(i+1, nextContentResult.Array(), requiredIDSet)
+		if err != nil {
+			return err
+		}
+		missingIDs := missingClaudeToolResultIDs(requiredIDs, toolResultIDs)
+		if len(missingIDs) > 0 {
+			return missingClaudeToolResultError(i, missingIDs)
+		}
+	}
+
+	return nil
+}
+
+func collectClaudeToolUseIDs(messageIndex int, contentArray []gjson.Result) ([]string, map[string]struct{}, *ClaudeRequestValidationError) {
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	for j, content := range contentArray {
+		if content.Get("type").String() != "tool_use" {
+			continue
+		}
+
+		id := strings.TrimSpace(content.Get("id").String())
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			return nil, nil, &ClaudeRequestValidationError{Message: fmt.Sprintf("messages.%d.content.%d.tool_use.id: Duplicate value %q", messageIndex, j, id)}
+		}
+
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	return ids, seen, nil
+}
+
+func collectClaudeToolResultIDs(messageIndex int, contentArray []gjson.Result, requiredIDs map[string]struct{}) (map[string]struct{}, *ClaudeRequestValidationError) {
+	ids := make(map[string]struct{})
+
+	for j, content := range contentArray {
+		if content.Get("type").String() != "tool_result" {
+			continue
+		}
+
+		id := strings.TrimSpace(content.Get("tool_use_id").String())
+		if id == "" {
+			continue
+		}
+		if _, ok := requiredIDs[id]; !ok {
+			return nil, &ClaudeRequestValidationError{Message: fmt.Sprintf("messages.%d.content.%d.tool_result.tool_use_id: Unexpected value %q; expected tool results for the immediately preceding tool_use ids", messageIndex, j, id)}
+		}
+		if _, ok := ids[id]; ok {
+			return nil, &ClaudeRequestValidationError{Message: fmt.Sprintf("messages.%d.content.%d.tool_result.tool_use_id: Duplicate value %q", messageIndex, j, id)}
+		}
+
+		ids[id] = struct{}{}
+	}
+
+	return ids, nil
+}
+
+func missingClaudeToolResultIDs(requiredIDs []string, toolResultIDs map[string]struct{}) []string {
+	missingIDs := make([]string, 0)
+
+	for _, id := range requiredIDs {
+		if _, ok := toolResultIDs[id]; ok {
+			continue
+		}
+		missingIDs = append(missingIDs, id)
+	}
+
+	return missingIDs
+}
+
+func missingClaudeToolResultError(messageIndex int, missingIDs []string) *ClaudeRequestValidationError {
+	return &ClaudeRequestValidationError{Message: fmt.Sprintf(
+		"messages.%d: `tool_use` ids were found without `tool_result` blocks immediately after: %s. Each `tool_use` block must have a corresponding `tool_result` block in the next message.",
+		messageIndex,
+		strings.Join(missingIDs, ", "),
+	)}
 }
 
 func ValidateClaudeImagesForGoogleUpstream(rawJSON []byte) *ClaudeRequestValidationError {

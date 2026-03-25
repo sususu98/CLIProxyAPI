@@ -62,6 +62,20 @@ func TestRejectInvalidClaudeMessagesRequest(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "tool use requires immediate tool result",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[
+					{"type":"tool_use","id":"toolu_004","name":"read_file","input":{}}
+				]},
+				{"role":"user","content":[
+					{"type":"text","text":"not a tool result"}
+				]}
+			]}`,
+			wantErr: true,
+			wantMsg: "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_004. Each `tool_use` block must have a corresponding `tool_result` block in the next message.",
+		},
+		{
 			name: "missing id rejected",
 			payload: `{"messages":[
 				{"role":"assistant","content":[
@@ -137,6 +151,39 @@ func TestAntigravityExecutorExecute_RejectsSVGImagePayload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SVG images are not supported by requested model") || !strings.Contains(err.Error(), "claude-opus-4-6") {
 		t.Fatalf("error = %q, want SVG rejection message", err.Error())
+	}
+
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T", err)
+	}
+	if se.code != 400 {
+		t.Fatalf("status code = %d, want 400", se.code)
+	}
+}
+
+func TestAntigravityExecutorExecute_RejectsMissingImmediateToolResult(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_005","name":"read_file","input":{}}]},{"role":"user","content":[{"type":"text","text":"not yet"}]}]}`)
+
+	executor := NewAntigravityExecutor(nil)
+	_, err := executor.Execute(
+		context.Background(),
+		nil,
+		cliproxyexecutor.Request{
+			Model:   "claude-opus-4-6-thinking",
+			Payload: payload,
+		},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("claude"),
+		},
+	)
+	if err == nil {
+		t.Fatal("expected missing tool_result payload to be rejected before upstream call")
+	}
+	if !strings.Contains(err.Error(), "tool_use") || !strings.Contains(err.Error(), "tool_result") || !strings.Contains(err.Error(), "toolu_005") {
+		t.Fatalf("error = %q, want immediate tool_result rejection message", err.Error())
 	}
 
 	se, ok := err.(statusErr)

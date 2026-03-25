@@ -43,12 +43,82 @@ func TestValidateClaudeMessagesRequest(t *testing.T) {
 			wantText: "messages.0.content.0.tool_use.id: Field required",
 		},
 		{
+			name: "duplicate tool use ids rejected",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[
+					{"type":"tool_use","id":"toolu_dup","name":"read_file","input":{}},
+					{"type":"tool_use","id":"toolu_dup","name":"write_file","input":{}}
+				]}
+			]}`,
+			wantErr:  true,
+			wantText: `messages.1.content.1.tool_use.id: Duplicate value "toolu_dup"`,
+		},
+		{
 			name: "valid payload passes",
 			payload: `{"messages":[
 				{"role":"user","content":"hi"},
-				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}]}
+				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}
 			]}`,
 			wantErr: false,
+		},
+		{
+			name: "tool result must immediately follow tool use",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"read_file","input":{}}]},
+				{"role":"user","content":[{"type":"text","text":"still waiting"}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}
+			]}`,
+			wantErr:  true,
+			wantText: "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_2. Each `tool_use` block must have a corresponding `tool_result` block in the next message.",
+		},
+		{
+			name: "next message after tool use must be user role",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_role","name":"read_file","input":{}}]},
+				{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"toolu_role","content":"ok"}]}
+			]}`,
+			wantErr:  true,
+			wantText: "messages.2.role: tool_result blocks must be provided in the next user message after tool_use",
+		},
+		{
+			name: "all tool uses in message must be satisfied by next message",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[
+					{"type":"tool_use","id":"toolu_3","name":"read_file","input":{}},
+					{"type":"tool_use","id":"toolu_4","name":"write_file","input":{}}
+				]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3","content":"ok"}]}
+			]}`,
+			wantErr:  true,
+			wantText: "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_4. Each `tool_use` block must have a corresponding `tool_result` block in the next message.",
+		},
+		{
+			name: "unexpected tool result id rejected",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_expected","name":"read_file","input":{}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_other","content":"ok"}]}
+			]}`,
+			wantErr:  true,
+			wantText: `messages.2.content.0.tool_result.tool_use_id: Unexpected value "toolu_other"; expected tool results for the immediately preceding tool_use ids`,
+		},
+		{
+			name: "duplicate tool result ids rejected",
+			payload: `{"messages":[
+				{"role":"user","content":"hi"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_result_dup","name":"read_file","input":{}}]},
+				{"role":"user","content":[
+					{"type":"tool_result","tool_use_id":"toolu_result_dup","content":"ok"},
+					{"type":"tool_result","tool_use_id":"toolu_result_dup","content":"again"}
+				]}
+			]}`,
+			wantErr:  true,
+			wantText: `messages.2.content.1.tool_result.tool_use_id: Duplicate value "toolu_result_dup"`,
 		},
 	}
 
