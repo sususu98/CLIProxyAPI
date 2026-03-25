@@ -119,6 +119,15 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return resp, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return resp, err
+		}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
@@ -129,7 +138,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
 	originalPayloadSource := req.Payload
@@ -295,6 +303,15 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return nil, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return nil, err
+		}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
@@ -305,7 +322,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
 	originalPayloadSource := req.Payload
@@ -512,13 +528,21 @@ modelLoop:
 // CountTokens counts tokens for the given request using the Gemini CLI API.
 func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+	}
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
 	models := cliPreviewFallbackOrder(baseModel)

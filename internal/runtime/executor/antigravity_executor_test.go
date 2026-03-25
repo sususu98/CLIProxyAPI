@@ -1,11 +1,16 @@
 package executor
 
 import (
+	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
-func TestRejectEmptyToolUseName(t *testing.T) {
+func TestRejectInvalidClaudeMessagesRequest(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -57,6 +62,16 @@ func TestRejectEmptyToolUseName(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "missing id rejected",
+			payload: `{"messages":[
+				{"role":"assistant","content":[
+					{"type":"tool_use","name":"read_file","input":{}}
+				]}
+			]}`,
+			wantErr: true,
+			wantMsg: "messages.0.content.0.tool_use.id: Field required",
+		},
+		{
 			name: "no tool_use passes",
 			payload: `{"messages":[
 				{"role":"user","content":"hello"},
@@ -65,7 +80,7 @@ func TestRejectEmptyToolUseName(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "no messages passes",
+			name:    "no messages passes",
 			payload: `{"model":"test"}`,
 			wantErr: false,
 		},
@@ -75,7 +90,7 @@ func TestRejectEmptyToolUseName(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := rejectEmptyToolUseName([]byte(tt.payload))
+			err := rejectInvalidClaudeMessagesRequest([]byte(tt.payload))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -96,5 +111,39 @@ func TestRejectEmptyToolUseName(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAntigravityExecutorExecute_RejectsSVGImagePayload(t *testing.T) {
+	t.Parallel()
+
+	svgData := base64.StdEncoding.EncodeToString([]byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"></svg>`))
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + svgData + `"}}]}]}`)
+
+	executor := NewAntigravityExecutor(nil)
+	_, err := executor.Execute(
+		context.Background(),
+		nil,
+		cliproxyexecutor.Request{
+			Model:   "claude-opus-4-6-thinking",
+			Payload: payload,
+		},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("claude"),
+		},
+	)
+	if err == nil {
+		t.Fatal("expected SVG payload to be rejected before upstream call")
+	}
+	if !strings.Contains(err.Error(), "SVG images are not supported by requested model") || !strings.Contains(err.Error(), "claude-opus-4-6") {
+		t.Fatalf("error = %q, want SVG rejection message", err.Error())
+	}
+
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T", err)
+	}
+	if se.code != 400 {
+		t.Fatalf("status code = %d, want 400", se.code)
 	}
 }

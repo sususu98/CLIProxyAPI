@@ -134,8 +134,14 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	if err := rejectEmptyToolUseName(req.Payload); err != nil {
-		return resp, err
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return resp, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return resp, err
+		}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
@@ -169,7 +175,6 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
 	originalPayloadSource := req.Payload
@@ -861,8 +866,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	if err := rejectEmptyToolUseName(req.Payload); err != nil {
-		return nil, err
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return nil, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return nil, err
+		}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -890,7 +901,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
 	originalPayloadSource := req.Payload
@@ -1063,6 +1073,15 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 // CountTokens counts tokens for the given request using the Antigravity API.
 func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+	}
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
@@ -1075,7 +1094,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
@@ -1631,31 +1649,6 @@ func resolveUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
 		ua = cfg.AntigravityUserAgents
 	}
 	return ua.ResolveAPIAgent()
-}
-
-// rejectEmptyToolUseName returns a 400 error if the request contains any
-// tool_use content block with an empty name. This is a client bug — every
-// tool_use must carry the tool name.
-func rejectEmptyToolUseName(payload []byte) error {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return nil
-	}
-	for i, msg := range messages.Array() {
-		contents := msg.Get("content")
-		if !contents.IsArray() {
-			continue
-		}
-		for j, c := range contents.Array() {
-			if c.Get("type").String() == "tool_use" && strings.TrimSpace(c.Get("name").String()) == "" {
-				return statusErr{
-					code: http.StatusBadRequest,
-					msg:  fmt.Sprintf(`{"type":"error","error":{"type":"invalid_request_error","message":"messages.%d.content.%d.tool_use.name: Field required"}}`, i, j),
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // rejectClaudePrefill returns an error if the translated payload ends with an
