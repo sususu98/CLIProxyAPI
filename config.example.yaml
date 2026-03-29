@@ -293,11 +293,47 @@ nonstream-keepalive-interval: 0
 # you select the protocol surface, but inference backend selection can still follow the resolved
 # model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
-# oauth-model-alias:
+#
+# Options:
+#   name: upstream model name
+#   alias: client-visible alias name
+#   fork: when true, keep original model AND add alias as extra model (default: false)
+#   force-mapping: when true, rewrite model name in responses to match the alias (default: false)
+#   fallback-model: alternative upstream model to try when the primary returns 503 capacity exhausted
+oauth-model-alias:
+  antigravity:
+    - name: "rev19-uic3-1p"
+      alias: "gemini-2.5-computer-use-preview-10-2025"
+    - name: "gemini-3-pro-image"
+      alias: "gemini-3-pro-image-preview"
+    - name: "gemini-3-pro-high"
+      alias: "gemini-3-pro-preview"
+    - name: "gemini-3-flash"
+      alias: "gemini-3-flash-preview"
+    - name: "claude-sonnet-4-5"
+      alias: "gemini-claude-sonnet-4-5"
+      fork: true
+      force-mapping: true
+    - name: "claude-sonnet-4-5-thinking"
+      alias: "gemini-claude-sonnet-4-5-thinking"
+      fork: true
+      force-mapping: true
+    - name: "claude-opus-4-5-thinking"
+      alias: "gemini-claude-opus-4-5-thinking"
+      fork: true
+      force-mapping: true
+#     # Model fallback example: when gemini-2.5-flash capacity is exhausted (503),
+#     # automatically retry with gemini-3-flash while keeping the client-visible alias
+#     - name: "gemini-2.5-flash"
+#       alias: "claude-haiku-4-5"
+#       fork: true
+#       force-mapping: true
+#       fallback-model: "gemini-3-flash"
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
 #       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
+#       force-mapping: true             # when true, rewrite model name in responses back to the alias (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"

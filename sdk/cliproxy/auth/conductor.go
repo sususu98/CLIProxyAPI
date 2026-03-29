@@ -104,6 +104,13 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// StoppableSelector is an optional interface for selectors that hold resources.
+// Selectors that implement this interface will have Stop called during shutdown.
+type StoppableSelector interface {
+	Selector
+	Stop()
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.
@@ -423,16 +430,25 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+	return m.resolveModelPool(auth, requestedModel)
+}
+
+// resolveModelPool resolves the upstream model pool for the given pre-resolved
+// upstream model. It checks for openai-compat pool rotation first, then falls
+// back to API key alias resolution. This is the second half of
+// prepareExecutionModels, separated so callers with a pre-resolved model
+// (e.g. from pre-resolved alias resolution) can skip the OAuth alias step.
+func (m *Manager) resolveModelPool(auth *Auth, upstreamModel string) []string {
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
 		return rotateStrings(pool, offset)
 	}
-	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
+	resolved := m.applyAPIKeyModelAlias(auth, upstreamModel)
 	if strings.TrimSpace(resolved) == "" {
-		resolved = requestedModel
+		resolved = upstreamModel
 	}
 	return []string{resolved}
 }
@@ -1074,8 +1090,18 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
+
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				attempted = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1083,6 +1109,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1100,17 +1133,46 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+		execReq.Model = aliasResult.UpstreamModel
+
+		// Resolve model pool for openai-compat providers; single model for OAuth providers.
+		var models []string
+		var pooled bool
+		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, execReq.Model); len(pool) > 0 {
+			if len(pool) == 1 {
+				models = pool
+			} else {
+				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, execReq.Model), len(pool))
+				models = rotateStrings(pool, offset)
+			}
+			pooled = len(pool) > 1
+		} else {
+			resolved := m.applyAPIKeyModelAlias(auth, execReq.Model)
+			if strings.TrimSpace(resolved) == "" {
+				resolved = execReq.Model
+			}
+			models = []string{resolved}
+		}
+
+		models = filterExecutionModels(auth, routeModel, models, pooled)
 		if len(models) == 0 {
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+
+		fb.Capture(aliasResult)
+
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
-			execReq := req
-			execReq.Model = upstreamModel
-			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			innerReq := execReq
+			innerReq.Model = upstreamModel
+			fb.ApplyModel(&innerReq)
+
+			resp, errExec := executor.Execute(execCtx, auth, innerReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1131,6 +1193,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			fb.PostProcessResponse(&resp, aliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1152,8 +1215,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
+
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				attempted = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1161,6 +1234,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1178,17 +1258,45 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+		execReq.Model = aliasResult.UpstreamModel
+
+		var models []string
+		var pooled bool
+		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, execReq.Model); len(pool) > 0 {
+			if len(pool) == 1 {
+				models = pool
+			} else {
+				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, execReq.Model), len(pool))
+				models = rotateStrings(pool, offset)
+			}
+			pooled = len(pool) > 1
+		} else {
+			resolved := m.applyAPIKeyModelAlias(auth, execReq.Model)
+			if strings.TrimSpace(resolved) == "" {
+				resolved = execReq.Model
+			}
+			models = []string{resolved}
+		}
+
+		models = filterExecutionModels(auth, routeModel, models, pooled)
 		if len(models) == 0 {
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+
+		fb.Capture(aliasResult)
+
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
-			execReq := req
-			execReq.Model = upstreamModel
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			innerReq := execReq
+			innerReq.Model = upstreamModel
+			fb.ApplyModel(&innerReq)
+
+			resp, errExec := executor.CountTokens(execCtx, auth, innerReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1209,6 +1317,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			fb.PostProcessResponse(&resp, aliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1230,8 +1339,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	fb := newFallbackController(routeModel)
+
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				attempted = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1243,6 +1362,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("model " + routeModel + " capacity exhausted on all auths")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1263,11 +1389,36 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+
+		var models []string
+		var pooled bool
+		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, aliasResult.UpstreamModel); len(pool) > 0 {
+			if len(pool) == 1 {
+				models = pool
+			} else {
+				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, aliasResult.UpstreamModel), len(pool))
+				models = rotateStrings(pool, offset)
+			}
+			pooled = len(pool) > 1
+		} else {
+			resolved := m.applyAPIKeyModelAlias(auth, aliasResult.UpstreamModel)
+			if strings.TrimSpace(resolved) == "" {
+				resolved = aliasResult.UpstreamModel
+			}
+			models = []string{resolved}
+		}
+
+		models = filterExecutionModels(auth, routeModel, models, pooled)
 		if len(models) == 0 {
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+
+		fb.Capture(aliasResult)
+
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -1278,6 +1429,28 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			lastErr = errStream
 			continue
+		}
+		effectiveAlias := fb.EffectiveAlias(aliasResult)
+		rewriteModel := ""
+		if effectiveAlias.ForceMapping && effectiveAlias.OriginalAlias != "" {
+			rewriteModel = effectiveAlias.OriginalAlias
+		}
+		if rewriteModel != "" {
+			rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: rewriteModel})
+			out := make(chan cliproxyexecutor.StreamChunk)
+			go func(src <-chan cliproxyexecutor.StreamChunk) {
+				defer close(out)
+				for chunk := range src {
+					if rewriter != nil && chunk.Payload != nil {
+						chunk.Payload = rewriter.RewriteChunk(chunk.Payload)
+					}
+					out <- chunk
+				}
+			}(streamResult.Chunks)
+			streamResult = &cliproxyexecutor.StreamResult{
+				Headers: streamResult.Headers,
+				Chunks:  out,
+			}
 		}
 		return streamResult, nil
 	}
@@ -1351,6 +1524,231 @@ func publishSelectedAuthMetadata(meta map[string]any, authID string) {
 	meta[cliproxyexecutor.SelectedAuthMetadataKey] = authID
 	if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
 		callback(authID)
+	}
+}
+
+func (m *Manager) executeWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if provider == "" {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+	}
+	routeModel := req.Model
+	tried := make(map[string]struct{})
+	var lastErr error
+
+	fb := newFallbackController(routeModel)
+
+	for {
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("no more auths for " + routeModel + " (provider=" + provider + ")")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, req.Model)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+		execReq.Model = aliasResult.UpstreamModel
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
+		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
+		if errExec != nil {
+			result.Error = &Error{Message: errExec.Error()}
+			var se cliproxyexecutor.StatusError
+			if errors.As(errExec, &se) && se != nil {
+				result.Error.HTTPStatus = se.StatusCode()
+			}
+			if ra := retryAfterFromError(errExec); ra != nil {
+				result.RetryAfter = ra
+			}
+			m.MarkResult(execCtx, result)
+			lastErr = errExec
+			continue
+		}
+		m.MarkResult(execCtx, result)
+		fb.PostProcessResponse(&resp, aliasResult)
+		return resp, nil
+	}
+}
+
+func (m *Manager) executeCountWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if provider == "" {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+	}
+	routeModel := req.Model
+	tried := make(map[string]struct{})
+	var lastErr error
+	fb := newFallbackController(routeModel)
+	for {
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("no more auths for " + routeModel + " (count, provider=" + provider + ")")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, req.Model)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+		execReq.Model = aliasResult.UpstreamModel
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
+		if errExec != nil {
+			result.Error = &Error{Message: errExec.Error()}
+			var se cliproxyexecutor.StatusError
+			if errors.As(errExec, &se) && se != nil {
+				result.Error.HTTPStatus = se.StatusCode()
+			}
+			if ra := retryAfterFromError(errExec); ra != nil {
+				result.RetryAfter = ra
+			}
+			m.MarkResult(execCtx, result)
+			lastErr = errExec
+			continue
+		}
+		m.MarkResult(execCtx, result)
+		fb.PostProcessResponse(&resp, aliasResult)
+		return resp, nil
+	}
+}
+
+func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if provider == "" {
+		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+	}
+	routeModel := req.Model
+	tried := make(map[string]struct{})
+	var lastErr error
+
+	fb := newFallbackController(routeModel)
+
+	for {
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		if errPick != nil {
+			if fb.ShouldFallback(lastErr) {
+				fb.Activate("no more auths for " + routeModel + " (stream, provider=" + provider + ")")
+				routeModel = fb.Model()
+				tried = make(map[string]struct{})
+				lastErr = nil
+				continue
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, req.Model)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+		execReq := req
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		aliasResult := m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+		execReq.Model = aliasResult.UpstreamModel
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+		fb.Capture(aliasResult)
+		fb.ApplyModel(&execReq)
+
+		streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
+		if errStream != nil {
+			rerr := &Error{Message: errStream.Error()}
+			var se cliproxyexecutor.StatusError
+			if errors.As(errStream, &se) && se != nil {
+				rerr.HTTPStatus = se.StatusCode()
+			}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+			result.RetryAfter = retryAfterFromError(errStream)
+			m.MarkResult(execCtx, result)
+			lastErr = errStream
+			continue
+		}
+		out := make(chan cliproxyexecutor.StreamChunk)
+		effectiveAlias := fb.EffectiveAlias(aliasResult)
+		rewriteModel := ""
+		if effectiveAlias.ForceMapping && effectiveAlias.OriginalAlias != "" {
+			rewriteModel = effectiveAlias.OriginalAlias
+		}
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, modelToRewrite string) {
+			defer close(out)
+			var failed bool
+			var rewriter *StreamRewriter
+			if modelToRewrite != "" {
+				rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: modelToRewrite})
+			}
+			for chunk := range streamChunks {
+				if chunk.Err != nil && !failed {
+					failed = true
+					rerr := &Error{Message: chunk.Err.Error()}
+					var se cliproxyexecutor.StatusError
+					if errors.As(chunk.Err, &se) && se != nil {
+						rerr.HTTPStatus = se.StatusCode()
+					}
+					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
+				}
+				if rewriter != nil && chunk.Payload != nil {
+					chunk.Payload = rewriter.RewriteChunk(chunk.Payload)
+				}
+				if chunk.Payload != nil || chunk.Err != nil {
+					out <- chunk
+				}
+			}
+			if !failed {
+				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
+			}
+		}(execCtx, auth.Clone(), provider, streamResult.Chunks, rewriteModel)
+		return &cliproxyexecutor.StreamResult{
+			Headers: streamResult.Headers,
+			Chunks:  out,
+		}, nil
 	}
 }
 
@@ -1791,7 +2189,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						shouldSuspendModel = true
 						setModelQuota = true
 					case 408, 500, 502, 503, 504:
-						if quotaCooldownDisabledForAuth(auth) {
+						if result.RetryAfter != nil && *result.RetryAfter > 0 {
+							state.NextRetryAfter = now.Add(*result.RetryAfter)
+						} else if quotaCooldownDisabledForAuth(auth) {
 							state.NextRetryAfter = time.Time{}
 						} else {
 							next := now.Add(1 * time.Minute)
@@ -1999,7 +2399,8 @@ func retryAfterFromError(err error) *time.Duration {
 	if retryAfter == nil {
 		return nil
 	}
-	return new(*retryAfter)
+	value := *retryAfter
+	return &value
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -2057,10 +2458,13 @@ func isModelSupportResultError(err *Error) bool {
 }
 
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error" and all 422 responses as request-shape failures,
-// where switching auths or pooled upstream models will not help. Model-support
-// errors are excluded so routing can fall through to another auth or upstream.
+// error that should not be retried. It treats 400 responses with
+// "invalid_request_error", "INVALID_ARGUMENT" or "FAILED_PRECONDITION", and
+// all 422 responses as request-shape failures where switching auths or pooled
+// upstream models will not help. Model-support errors are excluded so routing
+// can fall through to another auth or upstream.
+// It also treats 500 responses with "UNKNOWN" status as non-retryable, since
+// these Google API "Unknown Error" responses do not resolve with retries.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2071,9 +2475,37 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
+		errMsg := err.Error()
+		return strings.Contains(errMsg, "invalid_request_error") ||
+			strings.Contains(errMsg, "INVALID_ARGUMENT") ||
+			strings.Contains(errMsg, "FAILED_PRECONDITION")
+	case http.StatusInternalServerError:
+		errMsg := err.Error()
+		return strings.Contains(errMsg, "\"status\":\"UNKNOWN\"") ||
+			strings.Contains(errMsg, "\"status\": \"UNKNOWN\"")
 	case http.StatusUnprocessableEntity:
 		return true
+	default:
+		return false
+	}
+}
+
+// isModelUnavailableError returns true if the error indicates the model itself
+// is unavailable and a different model should be tried. This covers:
+//   - 503 with capacity-related message (MODEL_CAPACITY_EXHAUSTED)
+//   - 429 rate limiting (all auths exhausted for this model)
+func isModelUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	switch status {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusServiceUnavailable:
+		msg := strings.ToLower(err.Error())
+		return strings.Contains(msg, "capacity") ||
+			strings.Contains(msg, "unavailable")
 	default:
 		return false
 	}
@@ -2121,7 +2553,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
-		if quotaCooldownDisabledForAuth(auth) {
+		if retryAfter != nil && *retryAfter > 0 {
+			auth.NextRetryAfter = now.Add(*retryAfter)
+		} else if quotaCooldownDisabledForAuth(auth) {
 			auth.NextRetryAfter = time.Time{}
 		} else {
 			auth.NextRetryAfter = now.Add(1 * time.Minute)
@@ -2521,10 +2955,15 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
+// It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
 	if m.refreshCancel != nil {
 		m.refreshCancel()
 		m.refreshCancel = nil
+	}
+	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
+	if stoppable, ok := m.selector.(StoppableSelector); ok {
+		stoppable.Stop()
 	}
 }
 

@@ -223,10 +223,21 @@ type RoutingConfig struct {
 // It maps the upstream model name (Name) to the client-visible alias (Alias).
 // When Fork is true, the alias is added as an additional model in listings while
 // keeping the original model ID available.
+//
+// When ForceMapping is true, responses will have the model name rewritten to match
+// the alias instead of showing the upstream model name.
+//
+// FallbackModel specifies an alternative upstream model to try when the primary
+// model returns a capacity-exhausted error (503). This enables transparent model
+// fallback without changing the client-visible model name.
 type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	FallbackModel string `yaml:"fallback-model,omitempty" json:"fallback-model,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -805,7 +816,13 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
+			clean = append(clean, OAuthModelAlias{
+				Name:          name,
+				Alias:         alias,
+				Fork:          entry.Fork,
+				ForceMapping:  entry.ForceMapping,
+				FallbackModel: strings.TrimSpace(entry.FallbackModel),
+			})
 		}
 		if len(clean) > 0 {
 			out[channel] = clean
