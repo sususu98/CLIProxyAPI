@@ -30,6 +30,7 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+.sisyphus
 
 # Tooling metadata
 .vscode/*
@@ -49,3 +50,6 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+server
+
+zerogravity-src
