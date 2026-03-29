@@ -6,12 +6,14 @@ package middleware
 import (
 	"bytes"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -277,10 +279,36 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
-	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+
+	upstreamAttemptCount := w.countUpstreamAttempts(c)
+	hasUpstreamAPICall := upstreamAttemptCount > 0
+	hasRetryAttempts := upstreamAttemptCount > 1
+
+	forceLog := w.logOnErrorOnly && hasAPIError && hasUpstreamAPICall && !w.logger.IsEnabled()
+	// Context canceled (client disconnect) is never worth logging, even under forceLog.
+	if finalStatusCode == http.StatusInternalServerError && w.bodyContainsContextCanceled() {
+		return nil
+	}
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
+
+	// Determine body visibility based on final status when retries occurred.
+	// Only show full bodies for real errors (4xx except 429, 5xx except 503) — these need debugging.
+	// For success (200) or resource errors (429/503), hide bodies and only keep retry metadata
+	// (headers, auth account, timestamps).
+	var hideRequestBody, hideSuccessResponseBody bool
+	if hasRetryAttempts {
+		isRealError := finalStatusCode >= http.StatusBadRequest &&
+			finalStatusCode != http.StatusTooManyRequests &&
+			finalStatusCode != http.StatusServiceUnavailable
+		if !isRealError {
+			hideRequestBody = true
+			hideSuccessResponseBody = true
+		}
+	}
+
+	executor.FinalizeInterleavedLog(c, hideRequestBody, hideSuccessResponseBody)
 
 	if w.isStreaming && w.streamWriter != nil {
 		if w.chunkChannel != nil {
@@ -304,6 +332,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		if len(apiResponse) > 0 {
 			_ = w.streamWriter.WriteAPIResponse(apiResponse)
 		}
+		if hideRequestBody {
+			if setter, ok := w.streamWriter.(interface{ SetHideRequestBody(bool) }); ok {
+				setter.SetHideRequestBody(true)
+			}
+		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
 			return err
@@ -312,7 +345,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	requestBody := w.extractRequestBody(c)
+	if hideRequestBody {
+		requestBody = []byte("<omitted>")
+	}
+	return w.logRequest(requestBody, finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -382,6 +419,25 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 		return w.requestInfo.Body
 	}
 	return nil
+}
+
+var contextCanceledBytes = []byte("context canceled")
+
+func (w *ResponseWriterWrapper) bodyContainsContextCanceled() bool {
+	return w.body != nil && bytes.Contains(w.body.Bytes(), contextCanceledBytes)
+}
+
+func (w *ResponseWriterWrapper) countUpstreamAttempts(c *gin.Context) int {
+	if value, exists := c.Get("API_UPSTREAM_ATTEMPTS"); exists && value != nil {
+		if attempts, ok := value.([]interface{}); ok {
+			return len(attempts)
+		}
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() && rv.Kind() == reflect.Slice {
+			return rv.Len()
+		}
+	}
+	return 0
 }
 
 func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {

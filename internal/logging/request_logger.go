@@ -1013,6 +1013,14 @@ type FileStreamingLogWriter struct {
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
+
+	// hideRequestBody suppresses the client request body in the final log.
+	hideRequestBody bool
+}
+
+// SetHideRequestBody controls whether the client request body is suppressed in the final log.
+func (w *FileStreamingLogWriter) SetHideRequestBody(hide bool) {
+	w.hideRequestBody = hide
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -1089,6 +1097,7 @@ func (w *FileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 		return nil
 	}
 	w.apiResponse = bytes.Clone(apiResponse)
+	w.apiResponseTimestamp = time.Now()
 	return nil
 }
 
@@ -1182,7 +1191,13 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 }
 
 func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp); errWrite != nil {
+	bodyPath := w.requestBodyPath
+	var body []byte
+	if w.hideRequestBody {
+		bodyPath = ""
+		body = []byte("<omitted>")
+	}
+	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, body, bodyPath, w.timestamp); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
