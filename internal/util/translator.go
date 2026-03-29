@@ -27,13 +27,8 @@ import (
 func Walk(value gjson.Result, path, field string, paths *[]string) {
 	switch value.Type {
 	case gjson.JSON:
-		// For JSON objects and arrays, iterate through each child
 		value.ForEach(func(key, val gjson.Result) bool {
 			var childPath string
-			// Escape special characters for gjson/sjson path syntax
-			// . -> \.
-			// * -> \*
-			// ? -> \?
 			keyStr := key.String()
 			safeKey := escapeGJSONPathKey(keyStr)
 
@@ -49,7 +44,6 @@ func Walk(value gjson.Result, path, field string, paths *[]string) {
 			return true
 		})
 	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
-		// Terminal types - no further traversal needed
 	}
 }
 
@@ -293,6 +287,9 @@ func SanitizedToolNameMap(rawJSON []byte) map[string]string {
 	out := make(map[string]string)
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			name = strings.TrimSpace(tool.Get("function.name").String())
+		}
 		if name == "" {
 			return true
 		}

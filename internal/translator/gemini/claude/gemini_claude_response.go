@@ -169,7 +169,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				// This processes tool usage requests and formats them for Claude API compatibility
 				(*param).(*Params).SawToolCall = true
 				upstreamToolName := functionCallResult.Get("name").String()
-				upstreamToolName = util.RestoreSanitizedToolName((*param).(*Params).SanitizedNameMap, upstreamToolName)
+			upstreamToolName = util.RestoreSanitizedToolName((*param).(*Params).SanitizedNameMap, upstreamToolName)
 				clientToolName := util.MapToolName((*param).(*Params).ToolNameMap, upstreamToolName)
 
 				// FIX: Handle streaming split/delta where name might be empty in subsequent chunks.

@@ -102,6 +102,33 @@ func TestCleanJSONSchemaForAntigravity_ConstraintsToDescription(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_UniqueItemsRemoved(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"update_fields": {
+				"description": "Fields to update",
+				"items": {
+					"enum": ["name", "owner"],
+					"type": "string"
+				},
+				"type": "array",
+				"uniqueItems": true
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// uniqueItems should be REMOVED and moved to description
+	if strings.Contains(result, `"uniqueItems"`) {
+		t.Errorf("uniqueItems keyword should be removed, got: %s", result)
+	}
+	if !strings.Contains(result, "uniqueItems: true") {
+		t.Errorf("uniqueItems hint missing in description, got: %s", result)
+	}
+}
+
 func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_SmartSelection(t *testing.T) {
 	input := `{
 		"type": "object",
@@ -326,6 +353,78 @@ func TestCleanJSONSchemaForAntigravity_RequiredCleanup(t *testing.T) {
 
 	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
+}
+
+func TestCleanJSONSchemaForAntigravity_RequiredCleanup_NonObjectType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "required on string type removed",
+			input:    `{"type":"string","required":["a","b"],"properties":{"a":{"type":"string"},"b":{"type":"string"}}}`,
+			expected: `{"type":"string","properties":{"a":{"type":"string"},"b":{"type":"string"}}}`,
+		},
+		{
+			name:     "required on array type removed",
+			input:    `{"type":"array","items":{"type":"string"},"required":["x"]}`,
+			expected: `{"type":"array","items":{"type":"string"}}`,
+		},
+		{
+			name:     "required on object type kept",
+			input:    `{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}`,
+			expected: `{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}`,
+		},
+		{
+			name:     "required with missing properties removed",
+			input:    `{"type":"object","required":["a","b"]}`,
+			expected: `{"type":"object","properties":{"reason":{"description":"Brief explanation of why you are calling this tool","type":"string"}},"required":["reason"]}`,
+		},
+		{
+			name: "nested items.required removed when items.type is not object",
+			input: `{"type":"object","properties":{"edits":{"type":"array","items":{"type":"string","required":["a"],"properties":{"a":{"type":"string"}}}}},
+				"required":["edits"]}`,
+			expected: `{"type":"object","properties":{"edits":{"type":"array","items":{"type":"string","properties":{"a":{"type":"string"}}}}},
+				"required":["edits"]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := CleanJSONSchemaForAntigravity(tt.input)
+			compareJSON(t, tt.expected, result)
+		})
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_RequiredCleanup_FlattenThenCleanup(t *testing.T) {
+	t.Parallel()
+	input := `{
+		"type": "object",
+		"properties": {
+			"edits": {
+				"type": "array",
+				"items": {
+					"type": ["string", "object"],
+					"properties": {
+						"path": {"type": "string"},
+						"content": {"type": "string"}
+					},
+					"required": ["path", "content"]
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	itemsRequired := gjson.Get(result, "properties.edits.items.required")
+	itemsType := gjson.Get(result, "properties.edits.items.type").String()
+
+	if itemsType != "object" && itemsRequired.Exists() {
+		t.Errorf("items.type=%q but required still present: %s", itemsType, itemsRequired.Raw)
+	}
 }
 
 func TestCleanJSONSchemaForAntigravity_AllOfMerging_DotKeys(t *testing.T) {
@@ -870,6 +969,76 @@ func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_EmptyEnumFiltering(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		input           string
+		wantNoEmpty     bool
+		wantEnumRemoved bool
+	}{
+		{
+			name: "filters empty string from enum with valid values",
+			input: `{
+				"type": "object",
+				"properties": {
+					"memoryType": {"type": "string", "enum": ["activity","context","event","fact","location","other","people","preference","technology","topic",""]}
+				}
+			}`,
+			wantNoEmpty: true,
+		},
+		{
+			name: "removes enum key when all values are empty",
+			input: `{
+				"type": "object",
+				"properties": {
+					"status": {"type": "string", "enum": [""]}
+				}
+			}`,
+			wantEnumRemoved: true,
+		},
+		{
+			name: "filters null-coerced empty from mixed enum",
+			input: `{
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string", "enum": ["a", "", "b"]}
+				}
+			}`,
+			wantNoEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := CleanJSONSchemaForAntigravity(tt.input)
+
+			if tt.wantNoEmpty {
+				parsed := gjson.Get(result, "properties.*.enum")
+				parsed.ForEach(func(_, v gjson.Result) bool {
+					if v.IsArray() {
+						for _, item := range v.Array() {
+							if item.String() == "" {
+								t.Errorf("enum should not contain empty strings, got: %s", result)
+							}
+						}
+					}
+					return true
+				})
+			}
+
+			if tt.wantEnumRemoved {
+				if strings.Contains(result, `"enum"`) {
+					t.Errorf("enum key should be removed when all values are empty, got: %s", result)
+				}
+			}
+		})
+	}
+}
+
 func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *testing.T) {
 	input := `{
 		"$schema": "http://json-schema.org/draft-07/schema#",
@@ -1047,26 +1216,78 @@ func TestRemoveExtensionFields(t *testing.T) {
 	}
 }
 
-// uniqueItems should be stripped and moved to description hint (#2123).
-func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
+func TestCleanJSONSchema_CacheConsistency(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
-			"ids": {
-				"type": "array",
-				"description": "Unique identifiers",
-				"items": {"type": "string"},
-				"uniqueItems": true
-			}
-		}
+			"name": {"type": ["string", "null"]},
+			"count": {"type": "integer", "minimum": 0}
+		},
+		"additionalProperties": false
 	}`
 
+	// First call - populates cache
+	result1 := CleanJSONSchemaForAntigravity(input)
+	// Second call - should hit cache
+	result2 := CleanJSONSchemaForAntigravity(input)
+
+	if result1 != result2 {
+		t.Errorf("Cache returned different result:\nFirst:  %s\nSecond: %s", result1, result2)
+	}
+
+	// Verify Gemini variant also works
+	gemini1 := CleanJSONSchemaForGemini(input)
+	gemini2 := CleanJSONSchemaForGemini(input)
+
+	if gemini1 != gemini2 {
+		t.Errorf("Gemini cache returned different result:\nFirst:  %s\nSecond: %s", gemini1, gemini2)
+	}
+
+	// Antigravity and Gemini should differ (different addPlaceholder flag)
+	if result1 == gemini1 {
+		t.Log("Note: Antigravity and Gemini results are identical for this input (may be expected)")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_UnknownFieldsRemoved(t *testing.T) {
+	input := `{"type":"object","properties":{"source":{"type":"string","fmp":"bad","tiingo":"bad","description":"The source"}}}`
 	result := CleanJSONSchemaForAntigravity(input)
 
-	if strings.Contains(result, `"uniqueItems"`) {
-		t.Errorf("uniqueItems should be removed from schema")
+	if gjson.Get(result, "properties.source.fmp").Exists() {
+		t.Errorf("fmp field should be removed")
 	}
-	if !strings.Contains(result, "uniqueItems: true") {
-		t.Errorf("uniqueItems hint missing in description")
+	if gjson.Get(result, "properties.source.tiingo").Exists() {
+		t.Errorf("tiingo field should be removed")
+	}
+
+	if gjson.Get(result, "properties.source.type").String() != "string" {
+		t.Errorf("type field should be preserved")
+	}
+	if gjson.Get(result, "properties.source.description").String() != "The source" {
+		t.Errorf("description field should be preserved")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_PropertyNamesPreserved(t *testing.T) {
+	input := `{"type":"object","properties":{"fmp":{"type":"string"},"oecd":{"type":"number"}}}`
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if !gjson.Get(result, "properties.fmp").Exists() {
+		t.Errorf("property name 'fmp' should be preserved")
+	}
+	if !gjson.Get(result, "properties.oecd").Exists() {
+		t.Errorf("property name 'oecd' should be preserved")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_NestedUnknownFieldsRemoved(t *testing.T) {
+	input := `{"type":"object","properties":{"data":{"type":"object","properties":{"value":{"type":"number","fred":"bad","minimum":10}}}}}`
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if gjson.Get(result, "properties.data.properties.value.fred").Exists() {
+		t.Errorf("nested unknown field 'fred' should be removed")
+	}
+	if !gjson.Get(result, "properties.data.properties.value.minimum").Exists() {
+		t.Errorf("nested valid field 'minimum' should be preserved")
 	}
 }

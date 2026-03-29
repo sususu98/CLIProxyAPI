@@ -57,6 +57,13 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
 	if config.Mode == thinking.ModeBudget {
+		// For non-Claude models with level support (e.g., Gemini 3.x family),
+		// convert thinkingBudget to thinkingLevel as the upstream API prefers level format.
+		if !isClaude && len(modelInfo.Thinking.Levels) > 0 {
+			if converted, ok := a.budgetToLevel(config, modelInfo); ok {
+				return a.applyLevelFormat(body, converted)
+			}
+		}
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
 
@@ -187,6 +194,7 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 // normalizeClaudeBudget applies Claude-specific constraints to thinking budget.
 //
 // It handles:
+//   - Clamping maxOutputTokens to model's MaxCompletionTokens
 //   - Ensuring thinking budget < max_tokens
 //   - Removing thinkingConfig if budget < minimum allowed
 //
@@ -195,6 +203,13 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 func (a *Applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *registry.ModelInfo) (int, []byte) {
 	if modelInfo == nil {
 		return budget, payload
+	}
+
+	// Upstream API returns 400 INVALID_ARGUMENT when maxOutputTokens exceeds model limit.
+	if modelInfo.MaxCompletionTokens > 0 {
+		if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && int(maxTok.Int()) > modelInfo.MaxCompletionTokens {
+			payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+		}
 	}
 
 	// Get effective max tokens
@@ -233,4 +248,84 @@ func (a *Applier) effectiveMaxTokens(payload []byte, modelInfo *registry.ModelIn
 		return modelInfo.MaxCompletionTokens, true
 	}
 	return 0, false
+}
+
+// budgetToLevel converts a ModeBudget config to ModeLevel using the model's supported levels.
+// For non-Claude models that support thinkingLevel (e.g., Gemini 3.x family), the upstream API
+// prefers level-based format over numeric budgets. This function maps the budget to the nearest
+// supported thinking level.
+//
+// Returns the converted config and true if conversion succeeded.
+func (a *Applier) budgetToLevel(config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) (thinking.ThinkingConfig, bool) {
+	level, ok := thinking.ConvertBudgetToLevel(config.Budget)
+	if !ok {
+		return config, false
+	}
+	// Don't convert special modes (none/auto are handled separately)
+	if level == string(thinking.LevelNone) || level == string(thinking.LevelAuto) {
+		return config, false
+	}
+
+	supported := modelInfo.Thinking.Levels
+	resolved := nearestSupportedLevel(level, supported)
+	if resolved == "" {
+		return config, false
+	}
+
+	config.Mode = thinking.ModeLevel
+	config.Level = thinking.ThinkingLevel(resolved)
+	config.Budget = 0
+	return config, true
+}
+
+// nearestSupportedLevel finds the nearest supported level for the given standard level.
+// If the level is directly supported, returns it. Otherwise, finds the closest match by
+// standard level ordering (minimal < low < medium < high < xhigh).
+// On tie, prefers the higher level to avoid reducing thinking capability.
+//
+// NOTE: This intentionally differs from thinking/validate.go's clampLevel, which prefers
+// the LOWER level on tie. The divergence is by design: clampLevel is conservative (validation),
+// while this function is optimistic (format conversion should preserve user's intent for more thinking).
+func nearestSupportedLevel(level string, supported []string) string {
+	level = strings.ToLower(strings.TrimSpace(level))
+	// Direct match
+	for _, s := range supported {
+		if strings.EqualFold(level, strings.TrimSpace(s)) {
+			return strings.TrimSpace(s)
+		}
+	}
+
+	// Standard ordering for distance calculation
+	standardOrder := []string{"minimal", "low", "medium", "high", "xhigh"}
+	pos := -1
+	for i, l := range standardOrder {
+		if l == level {
+			pos = i
+			break
+		}
+	}
+	if pos == -1 {
+		return ""
+	}
+
+	bestLevel := ""
+	bestDist := len(standardOrder) + 1
+	for _, s := range supported {
+		s = strings.ToLower(strings.TrimSpace(s))
+		for i, l := range standardOrder {
+			if l == s {
+				dist := pos - i
+				if dist < 0 {
+					dist = -dist
+				}
+				// On tie, prefer the higher level to avoid reducing thinking capability
+				if dist < bestDist || (dist == bestDist && i > pos) {
+					bestDist = dist
+					bestLevel = s
+				}
+				break
+			}
+		}
+	}
+	return bestLevel
 }

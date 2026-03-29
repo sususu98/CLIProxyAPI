@@ -3,9 +3,12 @@ package util
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -15,17 +18,52 @@ var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?
 
 const placeholderReasonDescription = "Brief explanation of why you are calling this tool"
 
+const schemaCacheMaxSize = 5000
+
+var (
+	schemaCache      sync.Map
+	schemaCacheCount atomic.Int64
+)
+
+type schemaCacheKey struct {
+	hash           uint64
+	addPlaceholder bool
+}
+
+func hashSchema(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
+}
+
 // CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
 // semantic information as description hints.
 func CleanJSONSchemaForAntigravity(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, true)
+	return cleanJSONSchemaCached(jsonStr, true)
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
 // It removes unsupported keywords and simplifies schemas, without adding empty-schema placeholders.
 func CleanJSONSchemaForGemini(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, false)
+	return cleanJSONSchemaCached(jsonStr, false)
+}
+
+func cleanJSONSchemaCached(jsonStr string, addPlaceholder bool) string {
+	if jsonStr == "" {
+		return jsonStr
+	}
+	key := schemaCacheKey{hash: hashSchema(jsonStr), addPlaceholder: addPlaceholder}
+	if cached, ok := schemaCache.Load(key); ok {
+		return cached.(string)
+	}
+	result := cleanJSONSchema(jsonStr, addPlaceholder)
+	if schemaCacheCount.Load() < schemaCacheMaxSize {
+		if _, loaded := schemaCache.LoadOrStore(key, result); !loaded {
+			schemaCacheCount.Add(1)
+		}
+	}
+	return result
 }
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
@@ -45,6 +83,7 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
+	jsonStr = removeUnknownSchemaFields(jsonStr)
 	if !addPlaceholder {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
@@ -197,7 +236,14 @@ func convertEnumValuesToStrings(jsonStr string) string {
 
 		var stringVals []string
 		for _, item := range arr.Array() {
-			stringVals = append(stringVals, item.String())
+			if s := item.String(); s != "" {
+				stringVals = append(stringVals, s)
+			}
+		}
+
+		if len(stringVals) == 0 {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
 		}
 
 		// Always update enum values to strings and set type to "string"
@@ -317,18 +363,31 @@ func flattenAnyOfOneOf(jsonStr string) string {
 
 			items := arr.Array()
 			bestIdx, allTypes := selectBest(items)
-			selected := items[bestIdx].Raw
+			selected := items[bestIdx]
+
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+
+			selected.ForEach(func(k, v gjson.Result) bool {
+				fieldPath := joinPath(parentPath, escapeGJSONPathKey(k.String()))
+				jsonStr, _ = sjson.SetRaw(jsonStr, fieldPath, v.Raw)
+				return true
+			})
 
 			if parentDesc != "" {
-				selected = mergeDescriptionRaw(selected, parentDesc)
+				childDesc := gjson.Get(jsonStr, descriptionPath(parentPath)).String()
+				if childDesc != parentDesc {
+					merged := parentDesc
+					if childDesc != "" {
+						merged = fmt.Sprintf("%s (%s)", parentDesc, childDesc)
+					}
+					jsonStr, _ = sjson.Set(jsonStr, descriptionPath(parentPath), merged)
+				}
 			}
 
 			if len(allTypes) > 1 {
 				hint := "Accepts: " + strings.Join(allTypes, " | ")
-				selected = appendHintRaw(selected, hint)
+				jsonStr = appendHint(jsonStr, parentPath, hint)
 			}
-
-			jsonStr = setRawAt(jsonStr, parentPath, selected)
 		}
 	}
 	return jsonStr
@@ -438,7 +497,7 @@ func flattenTypeArrays(jsonStr string) string {
 
 func removeUnsupportedKeywords(jsonStr string) string {
 	keywords := append(unsupportedConstraints,
-		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
+		"$schema", "$defs", "definitions", "const", "$ref", "ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
 	)
@@ -505,14 +564,103 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 	}
 }
 
+// allowedSchemaFields are the fields allowed in a Gemini API Schema object.
+// Any other field is removed to prevent "Unknown name" errors from the protobuf-based API.
+// Reference: google.ai.generativelanguage.v1beta.Schema proto definition.
+var allowedSchemaFields = map[string]bool{
+	"type": true, "description": true, "enum": true,
+	"items": true, "properties": true, "required": true,
+	"nullable": true, "title": true,
+	"minimum": true, "maximum": true, "example": true,
+}
+
+// removeUnknownSchemaFields removes any field not in the Gemini Schema whitelist.
+// This is a safety net to catch non-standard fields (e.g., domain-specific annotations
+// like "fmp", "oecd") that survive earlier keyword-based cleanup.
+func removeUnknownSchemaFields(jsonStr string) string {
+	var deletePaths []string
+	walkForUnknownFields(gjson.Parse(jsonStr), "", false, &deletePaths)
+	if len(deletePaths) == 0 {
+		return jsonStr
+	}
+	sortByDepth(deletePaths)
+	for _, p := range deletePaths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
+	}
+	return jsonStr
+}
+
+func walkForUnknownFields(value gjson.Result, path string, inSchema bool, paths *[]string) {
+	if value.IsArray() {
+		arr := value.Array()
+		for i, item := range arr {
+			walkForUnknownFields(item, joinPath(path, strconv.Itoa(i)), inSchema, paths)
+		}
+		return
+	}
+
+	if !value.IsObject() {
+		return
+	}
+
+	// An object is a schema if it has "type" or "properties" — this prevents
+	// stripping non-schema fields when called on the full request payload.
+	isSchema := inSchema || value.Get("type").Exists() || value.Get("properties").Exists()
+
+	if !isSchema {
+		value.ForEach(func(key, val gjson.Result) bool {
+			safeKey := escapeGJSONPathKey(key.String())
+			walkForUnknownFields(val, joinPath(path, safeKey), false, paths)
+			return true
+		})
+		return
+	}
+
+	value.ForEach(func(key, val gjson.Result) bool {
+		keyStr := key.String()
+		safeKey := escapeGJSONPathKey(keyStr)
+		childPath := joinPath(path, safeKey)
+
+		// Inside a "properties" map, children are user-defined property names.
+		// Don't filter them — only recurse into their values (which are schemas).
+		if isPropertyDefinition(path) {
+			walkForUnknownFields(val, childPath, true, paths)
+			return true
+		}
+
+		if !allowedSchemaFields[keyStr] {
+			*paths = append(*paths, childPath)
+			return true
+		}
+
+		walkForUnknownFields(val, childPath, true, paths)
+		return true
+	})
+}
+
 func cleanupRequiredFields(jsonStr string) string {
 	for _, p := range findPaths(jsonStr, "required") {
 		parentPath := trimSuffix(p, ".required")
 		propsPath := joinPath(parentPath, "properties")
+		typePath := joinPath(parentPath, "type")
 
 		req := gjson.Get(jsonStr, p)
+		if !req.IsArray() {
+			continue
+		}
+
+		// "required" is only valid for object-type schemas. After
+		// flattenTypeArrays / flattenAnyOfOneOf the type may have changed
+		// from "object" to something else while "required" remained.
+		typeVal := gjson.Get(jsonStr, typePath)
+		if typeVal.Exists() && typeVal.String() != "object" {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
+		}
+
 		props := gjson.Get(jsonStr, propsPath)
-		if !req.IsArray() || !props.IsObject() {
+		if !props.IsObject() {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
 			continue
 		}
 

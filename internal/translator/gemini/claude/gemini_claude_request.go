@@ -85,7 +85,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 					case "tool_use":
-						functionName := contentResult.Get("name").String()
+						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						if toolUseID := contentResult.Get("id").String(); toolUseID != "" {
 							if derived := toolNameFromClaudeToolUseID(toolUseID); derived != "" {
 								functionName = derived
@@ -114,7 +114,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						funcName = util.SanitizeFunctionName(funcName)
 						responseData := contentResult.Get("content").Raw
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
-						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
+						part, _ = sjson.SetBytes(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
 						part, _ = sjson.SetBytes(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
@@ -163,6 +163,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				if err != nil {
 					return true
 				}
+				tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(gjson.GetBytes(tool, "name").String()))
 				tool, _ = sjson.DeleteBytes(tool, "strict")
 				tool, _ = sjson.DeleteBytes(tool, "input_examples")
 				tool, _ = sjson.DeleteBytes(tool, "type")

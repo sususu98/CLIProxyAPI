@@ -6,6 +6,8 @@
 package claude
 
 import (
+	"encoding/base64"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
@@ -16,6 +18,111 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func detectAndLogImageMime(declared, base64Data string) string {
+	corrected := util.DetectImageMimeType(declared, base64Data)
+	if corrected != declared {
+		log.Debugf("antigravity claude request: image mime corrected: %s -> %s", declared, corrected)
+	}
+	return corrected
+}
+
+func extractClaudeThinkingSignature(contentResult gjson.Result) string {
+	if signature := strings.TrimSpace(contentResult.Get("signature").String()); signature != "" {
+		return signature
+	}
+
+	thinkingResult := contentResult.Get("thinking")
+	if thinkingResult.IsObject() {
+		if signature := strings.TrimSpace(thinkingResult.Get("signature").String()); signature != "" {
+			return signature
+		}
+	}
+
+	return ""
+}
+
+func normalizeModelPartOrder(clientContentJSON string, targetIsClaude bool) string {
+	if targetIsClaude || gjson.Get(clientContentJSON, "role").String() != "model" {
+		return clientContentJSON
+	}
+
+	partsResult := gjson.Get(clientContentJSON, "parts")
+	if !partsResult.IsArray() {
+		return clientContentJSON
+	}
+
+	parts := partsResult.Array()
+	var thinkingParts []gjson.Result
+	var otherParts []gjson.Result
+	for _, part := range parts {
+		if part.Get("thought").Bool() {
+			thinkingParts = append(thinkingParts, part)
+		} else {
+			otherParts = append(otherParts, part)
+		}
+	}
+	if len(thinkingParts) == 0 {
+		return clientContentJSON
+	}
+
+	firstPartIsThinking := parts[0].Get("thought").Bool()
+	if firstPartIsThinking && len(thinkingParts) == 1 {
+		return clientContentJSON
+	}
+
+	var newParts []interface{}
+	for _, p := range thinkingParts {
+		newParts = append(newParts, p.Value())
+	}
+	for _, p := range otherParts {
+		newParts = append(newParts, p.Value())
+	}
+
+	clientContentJSON, _ = sjson.Set(clientContentJSON, "parts", newParts)
+	return clientContentJSON
+}
+
+func appendOrMergeAntigravityContent(contentsJSON, clientContentJSON string, targetIsClaude bool) (string, bool) {
+	partsResult := gjson.Get(clientContentJSON, "parts")
+	if !partsResult.IsArray() || len(partsResult.Array()) == 0 {
+		return contentsJSON, false
+	}
+
+	clientContentJSON = normalizeModelPartOrder(clientContentJSON, targetIsClaude)
+
+	contentsResult := gjson.Parse(contentsJSON)
+	if !contentsResult.IsArray() {
+		contentsJSON, _ = sjson.SetRaw("[]", "-1", clientContentJSON)
+		return contentsJSON, true
+	}
+
+	contents := contentsResult.Array()
+	if len(contents) == 0 {
+		contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
+		return contentsJSON, true
+	}
+
+	lastIndex := len(contents) - 1
+	lastRole := contents[lastIndex].Get("role").String()
+	currentRole := gjson.Get(clientContentJSON, "role").String()
+	if lastRole != "" && lastRole == currentRole {
+		for _, part := range partsResult.Array() {
+			contentsJSON, _ = sjson.SetRaw(contentsJSON, fmt.Sprintf("%d.parts.-1", lastIndex), part.Raw)
+		}
+
+		if currentRole == "model" {
+			mergedContent := gjson.Get(contentsJSON, fmt.Sprintf("%d", lastIndex)).Raw
+			normalizedMerged := normalizeModelPartOrder(mergedContent, targetIsClaude)
+			contentsJSON, _ = sjson.SetRaw(contentsJSON, fmt.Sprintf("%d", lastIndex), normalizedMerged)
+		}
+
+		return contentsJSON, true
+	}
+
+	contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
+	return contentsJSON, true
+}
 
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -38,6 +145,7 @@ import (
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
+	targetIsClaude := cache.GetModelGroup(modelName) == "claude"
 
 	// system instruction
 	var systemInstructionJSON []byte
@@ -51,6 +159,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
+				if strings.HasPrefix(systemPrompt, "x-anthropic-billing-header:") {
+					continue
+				}
 				partJSON := []byte(`{}`)
 				if systemPrompt != "" {
 					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
@@ -72,8 +183,30 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tool_use_id → tool_name lookup, populated incrementally during the main loop.
 	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
 	toolNameByID := make(map[string]string)
+	sanitizedToolIDByOriginal := make(map[string]string)
 
+	// Pre-scan: collect all tool_result IDs to detect orphan tool_use blocks.
+	// Claude requires every tool_use to have a matching tool_result in the next message.
+	// Clients may truncate conversation history, leaving orphan tool_use blocks that
+	// cause "tool_use ids were found without tool_result blocks" errors.
+	resolvedToolIDs := make(map[string]bool)
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
+	if messagesResult.IsArray() {
+		for _, msg := range messagesResult.Array() {
+			contents := msg.Get("content")
+			if !contents.IsArray() {
+				continue
+			}
+			for _, c := range contents.Array() {
+				if c.Get("type").String() == "tool_result" {
+					if id := c.Get("tool_use_id").String(); id != "" {
+						resolvedToolIDs[id] = true
+					}
+				}
+			}
+		}
+	}
+
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 		numMessages := len(messageResults)
@@ -101,62 +234,81 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
 						// Use GetThinkingText to handle wrapped thinking objects
 						thinkingText := thinking.GetThinkingText(contentResult)
+						hasThinkingText := strings.TrimSpace(thinkingText) != ""
 
-						// Always try cached signature first (more reliable than client-provided)
-						// Client may send stale or invalid signatures from different sessions
 						signature := ""
-						if thinkingText != "" {
-							if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
-								signature = cachedSig
-								// log.Debugf("Using cached signature for thinking block")
+						if cache.SignatureCacheEnabled() {
+							// Cache mode: prefer cached signature, validate length
+							if hasThinkingText {
+								if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
+									signature = cachedSig
+								}
 							}
-						}
 
-						// Fallback to client signature only if cache miss and client signature is valid
-						if signature == "" {
-							signatureResult := contentResult.Get("signature")
-							clientSignature := ""
-							if signatureResult.Exists() && signatureResult.String() != "" {
-								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
-								if len(arrayClientSignatures) == 2 {
-									if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
-										clientSignature = arrayClientSignatures[1]
+							// Fallback to client signature only if cache miss and client signature is valid
+							if signature == "" {
+								rawSignature := extractClaudeThinkingSignature(contentResult)
+								if rawSignature != "" {
+									clientSig := ""
+									arrayClientSignatures := strings.SplitN(rawSignature, "#", 2)
+									if len(arrayClientSignatures) == 2 {
+										if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
+											clientSig = arrayClientSignatures[1]
+										}
+									}
+									if cache.HasValidSignature(modelName, clientSig) {
+										signature = clientSig
 									}
 								}
 							}
-							if cache.HasValidSignature(modelName, clientSignature) {
-								signature = clientSignature
+
+							// Store for subsequent tool_use in the same message and across messages
+							if cache.HasValidSignature(modelName, signature) {
+								currentMessageThinkingSignature = signature
 							}
-							// log.Debugf("Using client-provided signature for thinking block")
+
+							// Skip unsigned thinking blocks when cache is enabled
+							if !cache.HasValidSignature(modelName, signature) {
+								log.Warnf("antigravity claude request: dropping thinking block with invalid signature (cache mode, textLen=%d)", len(thinkingText))
+								enableThoughtTranslate = false
+								continue
+							}
+
+							if !hasThinkingText {
+								log.Warn("antigravity claude request: dropping thinking block with empty text")
+								continue
+							}
+						} else {
+							rawSig := extractClaudeThinkingSignature(contentResult)
+							if rawSig != "" {
+								sigType := detectSignatureType(rawSig)
+								modelGroup := cache.GetModelGroup(modelName)
+								if sigType != "" && sigType == modelGroup {
+									signature = normalizeSignatureForModel(rawSig, modelName)
+									currentMessageThinkingSignature = signature
+								}
+							}
+							if signature == "" {
+								log.Warnf("antigravity claude request: dropping thinking block with incompatible signature (bypass mode, model=%s, textLen=%d)", modelName, len(thinkingText))
+								continue
+							}
+
+							if !hasThinkingText {
+								log.Warn("antigravity claude request: dropping thinking block with empty text")
+								continue
+							}
 						}
 
-						// Store for subsequent tool_use in the same message
-						if cache.HasValidSignature(modelName, signature) {
-							currentMessageThinkingSignature = signature
-						}
-
-						// Skip trailing unsigned thinking blocks on last assistant message
-						isUnsigned := !cache.HasValidSignature(modelName, signature)
-
-						// If unsigned, skip entirely (don't convert to text)
-						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-						// Converting to text would break this requirement
-						if isUnsigned {
-							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
-							enableThoughtTranslate = false
-							continue
-						}
-
-						// Valid signature, send as thought block
+						// Send as thought block
 						// Always include "text" field — Google Antigravity API requires it
 						// even for redacted thinking where the text is empty.
 						partJSON := []byte(`{}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
-						if signature != "" {
-							partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
-						}
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
 						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
+					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "redacted_thinking" {
+						continue
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
 						// Skip empty text parts to avoid Gemini API error:
@@ -173,7 +325,18 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						argsResult := contentResult.Get("input")
-						functionID := contentResult.Get("id").String()
+						originalFunctionID := contentResult.Get("id").String()
+						functionID := originalFunctionID
+						if originalFunctionID != "" {
+							functionID = util.SanitizeClaudeToolID(originalFunctionID)
+							sanitizedToolIDByOriginal[originalFunctionID] = functionID
+						}
+
+						// Skip orphan tool_use blocks that have no matching tool_result
+						if originalFunctionID != "" && !resolvedToolIDs[originalFunctionID] {
+							log.Warnf("antigravity claude request: skipping orphan tool_use id=%s name=%s (no matching tool_result in conversation)", originalFunctionID, functionName)
+							continue
+						}
 
 						if functionID != "" && functionName != "" {
 							toolNameByID[functionID] = functionName
@@ -194,15 +357,21 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if argsRaw != "" {
 							partJSON := []byte(`{}`)
 
-							// Use skip_thought_signature_validator for tool calls without valid thinking signature
-							// This is the approach used in opencode-google-antigravity-auth for Gemini
-							// and also works for Claude through Antigravity API
-							const skipSentinel = "skip_thought_signature_validator"
-							if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
-								partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", currentMessageThinkingSignature)
+							// Attach signature for tool calls — only from current message's thinking block
+							if cache.SignatureCacheEnabled() {
+								if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
+									partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", currentMessageThinkingSignature)
+								} else if !targetIsClaude {
+									const skipSentinel = "skip_thought_signature_validator"
+									partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", skipSentinel)
+								}
 							} else {
-								// No valid signature - use skip sentinel to bypass validation
-								partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", skipSentinel)
+								if currentMessageThinkingSignature != "" {
+									partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", currentMessageThinkingSignature)
+								} else if !targetIsClaude {
+									const skipSentinel = "skip_thought_signature_validator"
+									partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", skipSentinel)
+								}
 							}
 
 							if functionID != "" {
@@ -214,8 +383,16 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
+
+						sanitizedToolCallID := toolCallID
+						if sanitizedID, ok := sanitizedToolIDByOriginal[toolCallID]; ok {
+							sanitizedToolCallID = sanitizedID
+						} else if toolCallID != "" {
+							sanitizedToolCallID = util.SanitizeClaudeToolID(toolCallID)
+							sanitizedToolIDByOriginal[toolCallID] = sanitizedToolCallID
+						}
 						if toolCallID != "" {
-							funcName, ok := toolNameByID[toolCallID]
+							funcName, ok := toolNameByID[sanitizedToolCallID]
 							if !ok {
 								// Fallback: derive a semantic name from the ID by stripping
 								// the last two dash-separated segments (e.g. "get_weather-call-123" → "get_weather").
@@ -232,7 +409,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							functionResponseResult := contentResult.Get("content")
 
 							functionResponseJSON := []byte(`{}`)
-							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "id", toolCallID)
+							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "id", sanitizedToolCallID)
 							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "name", util.SanitizeFunctionName(funcName))
 
 							responseData := ""
@@ -248,10 +425,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								for _, fr := range frResults {
 									if fr.Get("type").String() == "image" && fr.Get("source.type").String() == "base64" {
 										inlineDataJSON := []byte(`{}`)
+										data := fr.Get("source.data").String()
 										if mimeType := fr.Get("source.media_type").String(); mimeType != "" {
-											inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", mimeType)
+											inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
 										}
-										if data := fr.Get("source.data").String(); data != "" {
+										if data != "" {
 											inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "data", data)
 										}
 
@@ -284,10 +462,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							} else if functionResponseResult.IsObject() {
 								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
 									inlineDataJSON := []byte(`{}`)
+									data := functionResponseResult.Get("source.data").String()
 									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
-										inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", mimeType)
+										inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
 									}
-									if data := functionResponseResult.Get("source.data").String(); data != "" {
+									if data != "" {
 										inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "data", data)
 									}
 
@@ -316,46 +495,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						sourceResult := contentResult.Get("source")
 						if sourceResult.Get("type").String() == "base64" {
 							inlineDataJSON := []byte(`{}`)
+							data := sourceResult.Get("data").String()
 							if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
-								inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", mimeType)
+								inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", detectAndLogImageMime(mimeType, data))
 							}
-							if data := sourceResult.Get("data").String(); data != "" {
+							if data != "" {
 								inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "data", data)
 							}
 
 							partJSON := []byte(`{}`)
 							partJSON, _ = sjson.SetRawBytes(partJSON, "inlineData", inlineDataJSON)
 							clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
-						}
-					}
-				}
-
-				// Reorder parts for 'model' role to ensure thinking block is first
-				if role == "model" {
-					partsResult := gjson.GetBytes(clientContentJSON, "parts")
-					if partsResult.IsArray() {
-						parts := partsResult.Array()
-						var thinkingParts []gjson.Result
-						var otherParts []gjson.Result
-						for _, part := range parts {
-							if part.Get("thought").Bool() {
-								thinkingParts = append(thinkingParts, part)
-							} else {
-								otherParts = append(otherParts, part)
-							}
-						}
-						if len(thinkingParts) > 0 {
-							firstPartIsThinking := parts[0].Get("thought").Bool()
-							if !firstPartIsThinking || len(thinkingParts) > 1 {
-								var newParts []interface{}
-								for _, p := range thinkingParts {
-									newParts = append(newParts, p.Value())
-								}
-								for _, p := range otherParts {
-									newParts = append(newParts, p.Value())
-								}
-								clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "parts", newParts)
-							}
 						}
 					}
 				}
@@ -367,8 +517,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					continue
 				}
 
-				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
-				hasContents = true
+				var appended bool
+				merged, appended := appendOrMergeAntigravityContent(string(contentsJSON), string(clientContentJSON), targetIsClaude)
+				contentsJSON = []byte(merged)
+				if appended {
+					hasContents = true
+				}
 			} else if contentsResult.Type == gjson.String {
 				prompt := contentsResult.String()
 				partJSON := []byte(`{}`)
@@ -376,8 +530,33 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					partJSON, _ = sjson.SetBytes(partJSON, "text", prompt)
 				}
 				clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
-				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
-				hasContents = true
+				merged, appended := appendOrMergeAntigravityContent(string(contentsJSON), string(clientContentJSON), targetIsClaude)
+				contentsJSON = []byte(merged)
+				if appended {
+					hasContents = true
+				}
+			}
+		}
+	}
+
+	// Gemini requires that a functionCall turn follows a user or functionResponse turn.
+	// If the first content is a model turn with a functionCall, prepend a minimal user turn.
+	if hasContents {
+		firstContent := gjson.ParseBytes(contentsJSON).Array()
+		if len(firstContent) > 0 && firstContent[0].Get("role").String() == "model" {
+			hasFunctionCall := false
+			for _, p := range firstContent[0].Get("parts").Array() {
+				if p.Get("functionCall").Exists() {
+					hasFunctionCall = true
+					break
+				}
+			}
+			if hasFunctionCall {
+				tmp, _ := sjson.SetRaw(`[{"role":"user","parts":[{"text":""}]}]`, "-1", firstContent[0].Raw)
+				for k := 1; k < len(firstContent); k++ {
+					tmp, _ = sjson.SetRaw(tmp, "-1", firstContent[k].Raw)
+				}
+				contentsJSON = []byte(tmp)
 			}
 		}
 	}
@@ -392,6 +571,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+
+			// Skip web_search tools - they are handled separately in the executor
+			if strings.HasPrefix(toolResult.Get("type").String(), "web_search") {
+				continue
+			}
+
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -477,9 +662,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
-	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
+	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts
 	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
-		switch t.Get("type").String() {
+		thinkingType := t.Get("type").String()
+		switch thinkingType {
 		case "enabled":
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
@@ -519,4 +705,122 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	out = common.AttachDefaultSafetySettings(out, "request.safetySettings")
 
 	return out
+}
+
+// detectSignatureType identifies which model family a signature belongs to.
+// Returns "claude", "gemini", or "" (unknown).
+//
+// detectSignatureType identifies the model family that produced a signature.
+//
+// Detection is based on Base64 prefix and protobuf internal structure:
+//
+//   - Ci/Ck/Cm/Cl prefixes: Gemini direct API thinking signatures (Field 1, 0x0a)
+//   - ZT prefix: Gemini tool call signatures (Base64-encoded UUID v4)
+//   - E prefix: decode Base64, parse protobuf Field 2 → Field 1 length:
+//     F1 ∈ [60,100] bytes → Claude (ECDSA-P256 signing block, 70 or 72 bytes)
+//     F1 > 100 bytes → Gemini-on-antigravity (different signing structure)
+//   - R prefix: 2-layer Base64 (Google Vertex direct), inner starts with E → Claude
+//
+// Supports optional "{modelGroup}#" prefix (stripped before analysis).
+func detectSignatureType(rawSignature string) string {
+	sig := rawSignature
+	if idx := strings.Index(sig, "#"); idx != -1 {
+		sig = sig[idx+1:]
+	}
+	if len(sig) < 20 {
+		return ""
+	}
+
+	// Gemini direct API: Ci/Ck/Cm/Cl (thinking) or ZT (tool call)
+	if strings.HasPrefix(sig, "Ci") || strings.HasPrefix(sig, "Ck") ||
+		strings.HasPrefix(sig, "Cm") || strings.HasPrefix(sig, "Cl") ||
+		strings.HasPrefix(sig, "ZT") {
+		return "gemini"
+	}
+
+	// R prefix: 2-layer Base64 (Google Vertex direct)
+	// Decode outer layer and validate inner E-prefix with protobuf check
+	if strings.HasPrefix(sig, "R") {
+		firstLayer, err := base64.StdEncoding.DecodeString(sig)
+		if err != nil || len(firstLayer) == 0 || firstLayer[0] != 'E' {
+			return ""
+		}
+		return classifyEPrefixSignature(string(firstLayer))
+	}
+
+	// E prefix: could be Claude or Gemini-on-antigravity
+	// Distinguish by protobuf Field 1 (signing block) length:
+	//   Claude: 70-72 bytes (ECDSA-P256 + channel/backend metadata)
+	//   Gemini-on-antigravity: 1000+ bytes (completely different structure)
+	if strings.HasPrefix(sig, "E") {
+		return classifyEPrefixSignature(sig)
+	}
+
+	return ""
+}
+
+// classifyEPrefixSignature decodes an E-prefix Base64 signature and inspects
+// the protobuf Field 1 (signing block) length to distinguish Claude from
+// Gemini-on-antigravity signatures.
+func classifyEPrefixSignature(sig string) string {
+	decoded, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil || len(decoded) < 6 {
+		return ""
+	}
+	if decoded[0] != 0x12 {
+		return ""
+	}
+	// Skip Field 2 varint length
+	offset := 1
+	for offset < len(decoded) && offset < 6 {
+		if decoded[offset]&0x80 == 0 {
+			offset++
+			break
+		}
+		offset++
+	}
+	// Expect Field 1 tag (0x0A)
+	if offset >= len(decoded) || decoded[offset] != 0x0A {
+		return ""
+	}
+	offset++
+	// Read Field 1 varint length
+	f1Len := 0
+	shift := uint(0)
+	for i := 0; i < 4 && offset+i < len(decoded); i++ {
+		b := decoded[offset+i]
+		f1Len |= int(b&0x7F) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+	}
+	if f1Len >= 60 && f1Len <= 100 {
+		return "claude"
+	}
+	if f1Len > 100 {
+		return "gemini"
+	}
+	return ""
+}
+
+// normalizeSignatureForModel converts a signature to the format expected by the target model
+// on Antigravity. Used in bypass mode.
+//
+// For Claude models: E... -> base64(E...) (2-layer), R... -> as-is
+// For Gemini models: pass through without modification
+func normalizeSignatureForModel(rawSignature, modelName string) string {
+	sig := rawSignature
+	if idx := strings.Index(sig, "#"); idx != -1 {
+		sig = sig[idx+1:]
+	}
+
+	if cache.GetModelGroup(modelName) == "claude" {
+		if strings.HasPrefix(sig, "E") {
+			return base64.StdEncoding.EncodeToString([]byte(sig))
+		}
+		return sig
+	}
+
+	return sig
 }
