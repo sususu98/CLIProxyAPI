@@ -7,6 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -146,6 +147,14 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 				continue
 			}
 			out = updated
+		}
+		// Apply array element filters for this rule.
+		for _, aeFilter := range rule.ArrayElementFilter {
+			fullPath := buildPayloadPath(root, aeFilter.Path)
+			if fullPath == "" {
+				continue
+			}
+			out = applyArrayElementFilter(out, fullPath, aeFilter.Match)
 		}
 	}
 	return out
@@ -316,4 +325,191 @@ func matchModelPattern(pattern, model string) bool {
 		pi++
 	}
 	return pi == len(pattern)
+}
+
+func applyArrayElementFilter(payload []byte, arrayPath string, match config.ElementMatch) []byte {
+	arr := gjson.GetBytes(payload, arrayPath)
+	if !arr.Exists() || !arr.IsArray() {
+		log.Debugf("array-element-filter: path %q not found or not an array, skipping", arrayPath)
+		return payload
+	}
+
+	key := strings.TrimSpace(match.Key)
+	if key == "" {
+		log.Debug("array-element-filter: empty match key, skipping filter")
+		return payload
+	}
+
+	filtered := make([]json.RawMessage, 0)
+	for _, elem := range arr.Array() {
+		if !elem.IsObject() {
+			filtered = append(filtered, json.RawMessage(elem.Raw))
+			continue
+		}
+		keyVal := elem.Get(key)
+		if !keyVal.Exists() {
+			filtered = append(filtered, json.RawMessage(elem.Raw))
+			continue
+		}
+		if match.Value == nil {
+			continue
+		}
+		if !elementMatchValueEquals(keyVal, match.Value) {
+			filtered = append(filtered, json.RawMessage(elem.Raw))
+		}
+	}
+
+	rebuilt, err := json.Marshal(filtered)
+	if err != nil {
+		return payload
+	}
+	updated, err := sjson.SetRawBytes(payload, arrayPath, rebuilt)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func elementMatchValueEquals(actual gjson.Result, expected any) bool {
+	if expected == nil {
+		return true
+	}
+
+	actualVal := actual.Value()
+
+	switch exp := expected.(type) {
+	case bool:
+		if av, ok := actualVal.(bool); ok {
+			return av == exp
+		}
+		return false
+	case float64:
+		switch av := actualVal.(type) {
+		case float64:
+			return av == exp
+		case int:
+			return float64(av) == exp
+		case int64:
+			return float64(av) == exp
+		}
+		return false
+	case int:
+		switch av := actualVal.(type) {
+		case float64:
+			return av == float64(exp)
+		case int:
+			return av == exp
+		case int64:
+			return int64(av) == int64(exp)
+		}
+		return false
+	case int64:
+		switch av := actualVal.(type) {
+		case float64:
+			return av == float64(exp)
+		case int:
+			return int64(av) == exp
+		case int64:
+			return av == exp
+		}
+		return false
+	case string:
+		if av, ok := actualVal.(string); ok {
+			return av == exp
+		}
+		return false
+	case nil:
+		return actualVal == nil
+	case map[string]any, map[any]any, []any:
+		return deepEqualJSON(actualVal, normalizeMapKeys(exp))
+	default:
+		return deepEqualJSON(actualVal, exp)
+	}
+}
+
+func normalizeMapKeys(v any) any {
+	switch m := v.(type) {
+	case map[any]any:
+		result := make(map[string]any, len(m))
+		for k, val := range m {
+			if ks, ok := k.(string); ok {
+				result[ks] = normalizeMapKeys(val)
+			}
+		}
+		return result
+	case map[string]any:
+		result := make(map[string]any, len(m))
+		for k, val := range m {
+			result[k] = normalizeMapKeys(val)
+		}
+		return result
+	case []any:
+		result := make([]any, len(m))
+		for i, val := range m {
+			result[i] = normalizeMapKeys(val)
+		}
+		return result
+	default:
+		return v
+	}
+}
+
+func deepEqualJSON(a, b any) bool {
+	switch av := a.(type) {
+	case nil:
+		return b == nil
+	case bool:
+		if bv, ok := b.(bool); ok {
+			return av == bv
+		}
+		return false
+	case float64:
+		switch bv := b.(type) {
+		case float64:
+			return av == bv
+		case int:
+			return av == float64(bv)
+		case int64:
+			return av == float64(bv)
+		}
+		return false
+	case string:
+		if bv, ok := b.(string); ok {
+			return av == bv
+		}
+		return false
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !deepEqualJSON(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for k, va := range av {
+			vb, exists := bv[k]
+			if !exists || !deepEqualJSON(va, vb) {
+				return false
+			}
+		}
+		return true
+	default:
+		return a == b
+	}
+}
+
+func normalizeJSON(data []byte) ([]byte, error) {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, err
+	}
+	return json.Marshal(v)
 }

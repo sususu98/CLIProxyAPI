@@ -22,6 +22,11 @@ const (
 	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
 	apiRequestKey  = "API_REQUEST"
 	apiResponseKey = "API_RESPONSE"
+
+	// maxErrorLogResponseBodySize limits cached response body when request-log is disabled.
+	// This prevents unbounded memory growth for large/streaming responses while still capturing
+	// sufficient context for error debugging.
+	maxErrorLogResponseBodySize = 32 * 1024 // 32KB
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -37,9 +42,14 @@ type upstreamRequestLog struct {
 	AuthValue string
 }
 
+// bodyPlaceholder is used to defer the decision of showing/hiding request body
+// until we know the final outcome of the request.
+const bodyPlaceholder = "<<UPSTREAM_BODY_PLACEHOLDER>>"
+
 type upstreamAttempt struct {
 	index                int
 	request              string
+	requestBody          []byte // stored when request-log is disabled, for deferred inclusion
 	response             *strings.Builder
 	responseIntroWritten bool
 	statusWritten        bool
@@ -47,17 +57,18 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	errorWritten         bool
+	bodyBytesWritten     int
+	bodyTruncated        bool
 }
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
+
+	requestLogEnabled := cfg != nil && cfg.RequestLog
 
 	attempts := getAttempts(ginCtx)
 	index := len(attempts) + 1
@@ -78,18 +89,33 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	}
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
-	builder.WriteString("\nBody:\n")
-	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
-	} else {
-		builder.WriteString("<empty>")
+
+	// Only include body in first request to avoid redundant logging on retries
+	var storedBody []byte
+	isFirstRequest := len(attempts) == 0
+	if isFirstRequest {
+		if requestLogEnabled {
+			builder.WriteString("\nBody:\n")
+			if len(info.Body) > 0 {
+				builder.WriteString(string(info.Body))
+			} else {
+				builder.WriteString("<empty>")
+			}
+		} else {
+			builder.WriteString("\nBody:\n")
+			builder.WriteString(bodyPlaceholder)
+			if len(info.Body) > 0 {
+				storedBody = info.Body
+			}
+		}
 	}
-	builder.WriteString("\n\n")
+	builder.WriteString("\n")
 
 	attempt := &upstreamAttempt{
-		index:    index,
-		request:  builder.String(),
-		response: &strings.Builder{},
+		index:       index,
+		request:     builder.String(),
+		requestBody: storedBody,
+		response:    &strings.Builder{},
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
@@ -98,9 +124,6 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
@@ -124,7 +147,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -149,9 +172,6 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
@@ -163,6 +183,12 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
+	requestLogEnabled := cfg != nil && cfg.RequestLog
+
+	if !requestLogEnabled && attempt.bodyTruncated {
+		return
+	}
+
 	if !attempt.headersWritten {
 		attempt.response.WriteString("Headers:\n")
 		writeHeaders(attempt.response, nil)
@@ -173,11 +199,31 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		attempt.response.WriteString("Body:\n")
 		attempt.bodyStarted = true
 	}
+
+	if !requestLogEnabled {
+		remaining := maxErrorLogResponseBodySize - attempt.bodyBytesWritten
+		if remaining <= 0 {
+			attempt.bodyTruncated = true
+			attempt.response.WriteString("\n<truncated: response body exceeded 32KB limit for error log>")
+			updateAggregatedResponse(ginCtx, attempts)
+			return
+		}
+		if len(data) > remaining {
+			data = data[:remaining]
+			attempt.bodyTruncated = true
+		}
+	}
+
 	if attempt.bodyHasContent {
 		attempt.response.WriteString("\n\n")
 	}
 	attempt.response.WriteString(string(data))
+	attempt.bodyBytesWritten += len(data)
 	attempt.bodyHasContent = true
+
+	if attempt.bodyTruncated {
+		attempt.response.WriteString("\n<truncated: response body exceeded 32KB limit for error log>")
+	}
 
 	updateAggregatedResponse(ginCtx, attempts)
 }
@@ -225,38 +271,67 @@ func ensureResponseIntro(attempt *upstreamAttempt) {
 }
 
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
-	var builder strings.Builder
-	for _, attempt := range attempts {
-		builder.WriteString(attempt.request)
-	}
-	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+	// No-op: defer log construction to FinalizeInterleavedLog for O(n) instead of O(n²)
 }
 
 func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
+	// No-op: defer log construction to FinalizeInterleavedLog for O(n) instead of O(n²)
+}
+
+func FinalizeInterleavedLog(ginCtx *gin.Context, hideUpstreamBody bool, hideSuccessResponseBody bool) {
 	if ginCtx == nil {
 		return
 	}
+	attempts := getAttempts(ginCtx)
+	if len(attempts) == 0 {
+		return
+	}
+
 	var builder strings.Builder
+	lastIdx := len(attempts) - 1
 	for idx, attempt := range attempts {
-		if attempt == nil || attempt.response == nil {
+		if attempt == nil {
 			continue
 		}
-		responseText := attempt.response.String()
-		if responseText == "" {
-			continue
+		requestText := attempt.request
+		if strings.Contains(requestText, bodyPlaceholder) {
+			var replacement string
+			if hideUpstreamBody {
+				replacement = "<omitted>"
+			} else if len(attempt.requestBody) > 0 {
+				replacement = string(attempt.requestBody)
+			} else {
+				replacement = "<empty>"
+			}
+			requestText = strings.Replace(requestText, bodyPlaceholder, replacement, 1)
 		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
+		builder.WriteString(requestText)
+		if attempt.response != nil {
+			responseText := attempt.response.String()
+			if responseText != "" {
+				if hideSuccessResponseBody && idx == lastIdx && attempt.bodyHasContent && !attempt.errorWritten {
+					responseText = omitResponseBody(responseText)
+				}
+				builder.WriteString(responseText)
+				if !strings.HasSuffix(responseText, "\n") {
+					builder.WriteString("\n")
+				}
+			}
 		}
 		if idx < len(attempts)-1 {
 			builder.WriteString("\n")
 		}
 	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+}
+
+func omitResponseBody(responseText string) string {
+	const bodyMarker = "Body:\n"
+	idx := strings.Index(responseText, bodyMarker)
+	if idx == -1 {
+		return responseText
+	}
+	return responseText[:idx+len(bodyMarker)] + "<omitted>\n"
 }
 
 func writeHeaders(builder *strings.Builder, headers http.Header) {

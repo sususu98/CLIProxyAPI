@@ -14,8 +14,12 @@ const (
 	// GeminiCLIVersion is the version string reported in the User-Agent for upstream requests.
 	GeminiCLIVersion = "0.31.0"
 
-	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
-	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+	// GeminiCLIUASuffix is the default UA suffix appended by google-auth-library's gaxios transport.
+	GeminiCLIUASuffix = "google-api-nodejs-client/10.5.0"
+
+	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header.
+	// The real Gemini CLI uses google-auth-library which auto-injects "gl-node/<node_version>".
+	GeminiCLIApiClientHeader = "gl-node/22.19.0"
 )
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
@@ -46,7 +50,19 @@ func GeminiCLIUserAgent(model string) string {
 	if model == "" {
 		model = "unknown"
 	}
-	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
+	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s) %s", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch(), GeminiCLIUASuffix)
+}
+
+// GeminiCLIUserAgentWithSuffix returns a User-Agent string with a custom suffix
+// replacing the default GeminiCLIUASuffix. If suffix is empty, the default is used.
+func GeminiCLIUserAgentWithSuffix(model, suffix string) string {
+	if model == "" {
+		model = "unknown"
+	}
+	if s := strings.TrimSpace(suffix); s != "" {
+		return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s) %s", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch(), s)
+	}
+	return GeminiCLIUserAgent(model)
 }
 
 // ScrubProxyAndFingerprintHeaders removes all headers that could reveal
