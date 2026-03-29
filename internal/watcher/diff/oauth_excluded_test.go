@@ -107,3 +107,71 @@ func expectContains(t *testing.T, list []string, target string) {
 	}
 	t.Fatalf("expected list to contain %q, got %#v", target, list)
 }
+
+func TestDiffOAuthModelPlanAccessChanges(t *testing.T) {
+	tests := []struct {
+		name         string
+		oldMap       map[string][]config.ModelPlanAccess
+		newMap       map[string][]config.ModelPlanAccess
+		wantChanges  int
+		wantAffected int
+	}{
+		{
+			name:         "both nil",
+			wantChanges:  0,
+			wantAffected: 0,
+		},
+		{
+			name:   "added provider",
+			oldMap: nil,
+			newMap: map[string][]config.ModelPlanAccess{
+				"codex": {{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}}},
+			},
+			wantChanges:  1,
+			wantAffected: 1,
+		},
+		{
+			name: "removed provider",
+			oldMap: map[string][]config.ModelPlanAccess{
+				"codex": {{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}}},
+			},
+			newMap:       nil,
+			wantChanges:  1,
+			wantAffected: 1,
+		},
+		{
+			name: "updated rules",
+			oldMap: map[string][]config.ModelPlanAccess{
+				"codex": {{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}}},
+			},
+			newMap: map[string][]config.ModelPlanAccess{
+				"codex": {{Pattern: "gpt-5.4", DeniedPlans: []string{"free", "team"}}},
+			},
+			wantChanges:  1,
+			wantAffected: 1,
+		},
+		{
+			name: "no change",
+			oldMap: map[string][]config.ModelPlanAccess{
+				"codex": {{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}}},
+			},
+			newMap: map[string][]config.ModelPlanAccess{
+				"codex": {{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}}},
+			},
+			wantChanges:  0,
+			wantAffected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changes, affected := DiffOAuthModelPlanAccessChanges(tt.oldMap, tt.newMap)
+			if len(changes) != tt.wantChanges {
+				t.Errorf("changes count = %d, want %d; changes: %v", len(changes), tt.wantChanges, changes)
+			}
+			if len(affected) != tt.wantAffected {
+				t.Errorf("affected count = %d, want %d; affected: %v", len(affected), tt.wantAffected, affected)
+			}
+		})
+	}
+}

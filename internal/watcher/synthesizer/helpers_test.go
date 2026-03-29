@@ -1,9 +1,12 @@
 package synthesizer
 
 import (
+	"encoding/base64"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
@@ -285,5 +288,597 @@ func TestAddConfigHeadersToAttrs(t *testing.T) {
 				t.Errorf("expected %v, got %v", tt.want, tt.attrs)
 			}
 		})
+	}
+}
+
+func TestShouldExcludeByPlan(t *testing.T) {
+	tests := []struct {
+		name string
+		plan string
+		rule config.ModelPlanAccess
+		want bool
+	}{
+		// --- allowed-plans (whitelist) ---
+		{
+			name: "allowed: plan in list",
+			plan: "plus",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{"plus", "team"}},
+			want: false,
+		},
+		{
+			name: "allowed: plan not in list",
+			plan: "free",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{"plus", "team"}},
+			want: true,
+		},
+		{
+			name: "allowed: empty list is no-op",
+			plan: "plus",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{}},
+			want: false, // empty AllowedPlans = no-op rule (same as both empty)
+		},
+		// --- denied-plans (blacklist) ---
+		{
+			name: "denied: plan in list",
+			plan: "free",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: true,
+		},
+		{
+			name: "denied: plan not in list",
+			plan: "plus",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: false,
+		},
+		{
+			name: "denied: unknown plan not in list",
+			plan: "enterprise",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: false,
+		},
+		{
+			name: "denied: empty list excludes none",
+			plan: "free",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{}},
+			want: false, // empty DeniedPlans with nil AllowedPlans = no-op rule
+		},
+		// --- both empty (no-op) ---
+		{
+			name: "both empty: no exclusion",
+			plan: "free",
+			rule: config.ModelPlanAccess{},
+			want: false,
+		},
+		// --- unknown plan semantics ---
+		{
+			name: "denied: unknown plan enterprise allowed through",
+			plan: "enterprise",
+			rule: config.ModelPlanAccess{DeniedPlans: []string{"free"}},
+			want: false,
+		},
+		{
+			name: "allowed: unknown plan enterprise excluded",
+			plan: "enterprise",
+			rule: config.ModelPlanAccess{AllowedPlans: []string{"plus", "team"}},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldExcludeByPlan(tt.plan, tt.rule)
+			if got != tt.want {
+				t.Errorf("shouldExcludeByPlan(%q, %+v) = %v, want %v", tt.plan, tt.rule, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_DeniedPlans(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.2*", DeniedPlans: []string{"plus"}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		plan         string
+		wantExcluded string // comma-separated sorted excluded models, or empty
+	}{
+		{
+			name:         "free account: excluded from 5.3 and 5.4",
+			plan:         "free",
+			wantExcluded: "gpt-5.3-codex,gpt-5.4",
+		},
+		{
+			name:         "plus account: excluded from 5.2",
+			plan:         "plus",
+			wantExcluded: "gpt-5.2*",
+		},
+		{
+			name:         "team account: no exclusions",
+			plan:         "team",
+			wantExcluded: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &coreauth.Auth{
+				Provider:   "codex",
+				Metadata:   map[string]any{},
+				Attributes: map[string]string{"plan": tt.plan},
+			}
+			// Directly test the exclusion logic by calling the inner loop.
+			var planExcluded []string
+			for _, rule := range cfg.OAuthModelPlanAccess["codex"] {
+				if shouldExcludeByPlan(tt.plan, rule) {
+					planExcluded = append(planExcluded, rule.Pattern)
+				}
+			}
+			if len(planExcluded) > 0 {
+				mergeIntoExcludedModels(auth, planExcluded)
+			}
+			got := auth.Attributes["excluded_models"]
+			if got != tt.wantExcluded {
+				t.Errorf("excluded_models = %q, want %q", got, tt.wantExcluded)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_AllowedPlans(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", AllowedPlans: []string{"plus", "team"}},
+				{Pattern: "gpt-5.4", AllowedPlans: []string{"plus", "team"}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		plan         string
+		wantExcluded string
+	}{
+		{
+			name:         "free excluded from both",
+			plan:         "free",
+			wantExcluded: "gpt-5.3-codex,gpt-5.4",
+		},
+		{
+			name:         "plus allowed",
+			plan:         "plus",
+			wantExcluded: "",
+		},
+		{
+			name:         "team allowed",
+			plan:         "team",
+			wantExcluded: "",
+		},
+		{
+			name:         "unknown plan excluded",
+			plan:         "enterprise",
+			wantExcluded: "gpt-5.3-codex,gpt-5.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &coreauth.Auth{
+				Provider:   "codex",
+				Attributes: map[string]string{},
+			}
+			var planExcluded []string
+			for _, rule := range cfg.OAuthModelPlanAccess["codex"] {
+				if shouldExcludeByPlan(tt.plan, rule) {
+					planExcluded = append(planExcluded, rule.Pattern)
+				}
+			}
+			if len(planExcluded) > 0 {
+				mergeIntoExcludedModels(auth, planExcluded)
+			}
+			got := auth.Attributes["excluded_models"]
+			if got != tt.wantExcluded {
+				t.Errorf("excluded_models = %q, want %q", got, tt.wantExcluded)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_MergeWithExisting(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"excluded_models": "existing-model",
+		},
+	}
+	rules := []config.ModelPlanAccess{
+		{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+	}
+	var planExcluded []string
+	for _, rule := range rules {
+		if shouldExcludeByPlan("free", rule) {
+			planExcluded = append(planExcluded, rule.Pattern)
+		}
+	}
+	mergeIntoExcludedModels(auth, planExcluded)
+
+	want := "existing-model,gpt-5.4"
+	if got := auth.Attributes["excluded_models"]; got != want {
+		t.Errorf("excluded_models = %q, want %q", got, want)
+	}
+}
+
+func TestApplyOAuthPlanAccess_NoConfig(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{},
+	}
+	// No plan access config — should be a no-op.
+	ApplyOAuthPlanAccess(auth, &config.Config{}, "/path/codex-test.json")
+	if _, ok := auth.Attributes["excluded_models"]; ok {
+		t.Error("expected no excluded_models when config is empty")
+	}
+}
+
+func TestApplyOAuthPlanAccess_UnsupportedProvider(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "antigravity",
+		Attributes: map[string]string{},
+	}
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"antigravity": {
+				{Pattern: "some-model", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	// antigravity has no plan resolver, so resolveOAuthPlan returns "".
+	// Unknown plan should be permissive (no exclusions).
+	ApplyOAuthPlanAccess(auth, cfg, "/path/antigravity-test.json")
+	if _, ok := auth.Attributes["excluded_models"]; ok {
+		t.Error("expected no excluded_models for unsupported provider")
+	}
+}
+
+func TestInferPlanFromFilename(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/auths/codex-user@test.com-plus.json", "plus"},
+		{"/auths/codex-user@test.com-team.json", "team"},
+		{"/auths/codex-user@test.com-pro.json", "pro"},
+		{"/auths/codex-user@test.com.json", ""},
+		{"/auths/codex-user@test.com-free.json", "free"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := inferPlanFromFilename(tt.path)
+			if got != tt.want {
+				t.Errorf("inferPlanFromFilename(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_HappyPath_FreePlanExcluded(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Metadata:   map[string]any{},
+		Attributes: map[string]string{},
+	}
+	// Use filename with -free suffix to infer plan type via fallback.
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-user@test.com-free.json")
+
+	wantExcluded := "gpt-5.3-codex,gpt-5.4"
+	if got := auth.Attributes["excluded_models"]; got != wantExcluded {
+		t.Errorf("excluded_models = %q, want %q", got, wantExcluded)
+	}
+	if got := auth.Attributes["plan"]; got != "free" {
+		t.Errorf("plan = %q, want %q", got, "free")
+	}
+	if _, ok := auth.Attributes["excluded_models_hash"]; !ok {
+		t.Error("expected excluded_models_hash to be set")
+	}
+}
+
+func TestApplyOAuthPlanAccess_JWTPlanResolution(t *testing.T) {
+	// Build a mock JWT with chatgpt_plan_type = "free".
+	// JWT format: header.payload.signature (no signature verification).
+	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	payload := `{"email":"user@test.com","https://api.openai.com/auth":{"chatgpt_plan_type":"free","chatgpt_account_id":"acc123"}}`
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	mockJWT := headerB64 + "." + payloadB64 + ".fake-signature"
+
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"id_token": mockJWT,
+		},
+		Attributes: map[string]string{},
+	}
+	// Filename has -plus suffix, but JWT takes priority with "free".
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-user@test.com-plus.json")
+
+	wantExcluded := "gpt-5.3-codex,gpt-5.4"
+	if got := auth.Attributes["excluded_models"]; got != wantExcluded {
+		t.Errorf("excluded_models = %q, want %q", got, wantExcluded)
+	}
+	if got := auth.Attributes["plan"]; got != "free" {
+		t.Errorf("plan = %q, want %q (JWT should override filename)", got, "free")
+	}
+}
+
+func TestApplyOAuthPlanAccess_JWTPlusPlan_NoExclusion(t *testing.T) {
+	// JWT says "plus" — should NOT be excluded by denied-plans=["free"].
+	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	payload := `{"email":"user@test.com","https://api.openai.com/auth":{"chatgpt_plan_type":"plus"}}`
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	mockJWT := headerB64 + "." + payloadB64 + ".fake-signature"
+
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.3-codex", DeniedPlans: []string{"free"}},
+				{Pattern: "gpt-5.4", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"id_token": mockJWT,
+		},
+		Attributes: map[string]string{},
+	}
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-user@test.com-plus.json")
+
+	if got := auth.Attributes["excluded_models"]; got != "" {
+		t.Errorf("expected no excluded_models for plus plan, got %q", got)
+	}
+	if got := auth.Attributes["plan"]; got != "plus" {
+		t.Errorf("plan = %q, want %q", got, "plus")
+	}
+}
+
+func TestIsPaidPlan(t *testing.T) {
+	tests := []struct {
+		plan string
+		want bool
+	}{
+		{"plus", true},
+		{"team", true},
+		{"pro", true},
+		{"free", false},
+		{"enterprise", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.plan, func(t *testing.T) {
+			if got := isPaidPlan(tt.plan); got != tt.want {
+				t.Errorf("isPaidPlan(%q) = %v, want %v", tt.plan, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSubscriptionActiveUntil(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  any
+		wantOK bool
+		check  func(t *testing.T, got time.Time)
+	}{
+		{"nil", nil, false, nil},
+		{"empty string", "", false, nil},
+		{"whitespace string", "  ", false, nil},
+		{"garbage string", "not-a-date", false, nil},
+		{"negative float", float64(-1), false, nil},
+		{"zero float", float64(0), false, nil},
+		{"bool type", true, false, nil},
+		{
+			"RFC3339 string",
+			"2026-02-14T00:00:00Z",
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC)
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"ISO 8601 without timezone",
+			"2026-02-14T12:30:00",
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Date(2026, 2, 14, 12, 30, 0, 0, time.UTC)
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"date-only string",
+			"2026-02-14",
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC)
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"unix seconds",
+			float64(1771027200), // 2026-02-14T12:00:00Z
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Unix(1771027200, 0).UTC()
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			"unix milliseconds",
+			float64(1771027200000), // same moment in ms
+			true,
+			func(t *testing.T, got time.Time) {
+				want := time.Unix(1771027200, 0).UTC()
+				if !got.Equal(want) {
+					t.Errorf("got %v, want %v", got, want)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseSubscriptionActiveUntil(tt.input)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if tt.check != nil {
+				tt.check(t, got)
+			}
+		})
+	}
+}
+
+func buildMockJWT(planType string, activeUntil any) string {
+	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	activeUntilJSON := "null"
+	switch v := activeUntil.(type) {
+	case string:
+		activeUntilJSON = fmt.Sprintf("%q", v)
+	case float64:
+		activeUntilJSON = fmt.Sprintf("%v", v)
+	case int:
+		activeUntilJSON = fmt.Sprintf("%d", v)
+	}
+	payload := fmt.Sprintf(
+		`{"email":"test@example.com","https://api.openai.com/auth":{"chatgpt_plan_type":"%s","chatgpt_account_id":"acc123","chatgpt_subscription_active_until":%s}}`,
+		planType, activeUntilJSON,
+	)
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return headerB64 + "." + payloadB64 + ".fake-signature"
+}
+
+func TestResolveCodexPlan_SubscriptionExpiry(t *testing.T) {
+	tests := []struct {
+		name        string
+		planType    string
+		activeUntil any
+		wantPlan    string
+	}{
+		{
+			name:        "plus with active subscription",
+			planType:    "plus",
+			activeUntil: time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+			wantPlan:    "plus",
+		},
+		{
+			name:        "plus with expired subscription",
+			planType:    "plus",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "plus with nil active_until (no downgrade)",
+			planType:    "plus",
+			activeUntil: nil,
+			wantPlan:    "plus",
+		},
+		{
+			name:        "team with expired subscription",
+			planType:    "team",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "pro with expired subscription",
+			planType:    "pro",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "free plan skips expiry check",
+			planType:    "free",
+			activeUntil: "2025-01-01T00:00:00Z",
+			wantPlan:    "free",
+		},
+		{
+			name:        "plus with expired unix timestamp",
+			planType:    "plus",
+			activeUntil: float64(1704067200), // 2024-01-01T00:00:00Z
+			wantPlan:    "free",
+		},
+		{
+			name:        "plus recently expired within skew (no downgrade)",
+			planType:    "plus",
+			activeUntil: time.Now().Add(-30 * time.Minute).Format(time.RFC3339),
+			wantPlan:    "plus",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockJWT := buildMockJWT(tt.planType, tt.activeUntil)
+			metadata := map[string]any{"id_token": mockJWT}
+			got := resolveCodexPlan(metadata, "/auths/codex-test@example.com.json")
+			if got != tt.wantPlan {
+				t.Errorf("resolveCodexPlan() = %q, want %q", got, tt.wantPlan)
+			}
+		})
+	}
+}
+
+func TestApplyOAuthPlanAccess_ExpiredPlusDeniedAsFreePlan(t *testing.T) {
+	expiredJWT := buildMockJWT("plus", "2025-01-01T00:00:00Z")
+	cfg := &config.Config{
+		OAuthModelPlanAccess: map[string][]config.ModelPlanAccess{
+			"codex": {
+				{Pattern: "gpt-5.4*", DeniedPlans: []string{"free"}},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Metadata:   map[string]any{"id_token": expiredJWT},
+		Attributes: map[string]string{},
+	}
+	ApplyOAuthPlanAccess(auth, cfg, "/auths/codex-test@example.com-plus.json")
+
+	if got := auth.Attributes["plan"]; got != "free" {
+		t.Errorf("plan = %q, want %q (expired plus should be downgraded)", got, "free")
+	}
+	wantExcluded := "gpt-5.4*"
+	if got := auth.Attributes["excluded_models"]; got != wantExcluded {
+		t.Errorf("excluded_models = %q, want %q", got, wantExcluded)
 	}
 }

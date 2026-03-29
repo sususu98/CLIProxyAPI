@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -107,6 +108,22 @@ func (w *Watcher) reloadConfig() bool {
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
 		_, affectedOAuthProviders = diff.DiffOAuthExcludedModelChanges(oldConfig.OAuthExcludedModels, newConfig.OAuthExcludedModels)
+		// Also track plan access rule changes; merge affected providers.
+		if _, planAffected := diff.DiffOAuthModelPlanAccessChanges(oldConfig.OAuthModelPlanAccess, newConfig.OAuthModelPlanAccess); len(planAffected) > 0 {
+			seen := make(map[string]struct{}, len(affectedOAuthProviders)+len(planAffected))
+			for _, p := range affectedOAuthProviders {
+				seen[p] = struct{}{}
+			}
+			for _, p := range planAffected {
+				seen[p] = struct{}{}
+			}
+			merged := make([]string, 0, len(seen))
+			for p := range seen {
+				merged = append(merged, p)
+			}
+			affectedOAuthProviders = merged
+			sort.Strings(affectedOAuthProviders)
+		}
 	}
 
 	util.SetLogLevel(newConfig)

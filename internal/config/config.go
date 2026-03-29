@@ -150,6 +150,12 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthModelPlanAccess defines per-provider model access restrictions based on account plan type.
+	// For each rule, if the account's plan is NOT in allowed-plans, the pattern is added to
+	// excluded_models, preventing routing and model listing for that model pattern.
+	// Example: restrict gpt-5.4 to "plus" plan accounts only for the "codex" provider.
+	OAuthModelPlanAccess map[string][]ModelPlanAccess `yaml:"oauth-model-plan-access,omitempty" json:"oauth-model-plan-access,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -338,6 +344,26 @@ type OAuthModelAlias struct {
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
 	FallbackModel string `yaml:"fallback-model,omitempty" json:"fallback-model,omitempty"`
+}
+
+// ModelPlanAccess defines plan-based model access restrictions for an OAuth provider.
+// Each rule specifies a model pattern and either an allow-list or deny-list of plans.
+// When using AllowedPlans: accounts whose plan is NOT in the list are excluded from the pattern.
+// When using DeniedPlans: accounts whose plan IS in the list are excluded from the pattern.
+// AllowedPlans and DeniedPlans are mutually exclusive — only one may be set per rule.
+type ModelPlanAccess struct {
+	// Pattern is the model name or wildcard pattern (e.g., "gpt-5.4*", "gpt-5.3-codex").
+	Pattern string `yaml:"pattern" json:"pattern"`
+
+	// AllowedPlans lists the plan types that are allowed to access this model pattern.
+	// If the account's plan is NOT in this list, the pattern is excluded.
+	// Mutually exclusive with DeniedPlans.
+	AllowedPlans []string `yaml:"allowed-plans,omitempty" json:"allowed-plans,omitempty"`
+
+	// DeniedPlans lists the plan types that are denied access to this model pattern.
+	// If the account's plan IS in this list, the pattern is excluded.
+	// Mutually exclusive with AllowedPlans.
+	DeniedPlans []string `yaml:"denied-plans,omitempty" json:"denied-plans,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -806,6 +832,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize OAuth model plan access rules.
+	cfg.OAuthModelPlanAccess = NormalizeOAuthModelPlanAccess(cfg.OAuthModelPlanAccess)
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -1115,6 +1144,72 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 			continue
 		}
 		out[key] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeOAuthModelPlanAccess normalizes per-provider model plan access rules.
+// It trims whitespace, lowercases keys, deduplicates plan lists, drops empty entries,
+// and validates that allowed-plans and denied-plans are not both set on the same rule.
+func NormalizeOAuthModelPlanAccess(entries map[string][]ModelPlanAccess) map[string][]ModelPlanAccess {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]ModelPlanAccess, len(entries))
+	for provider, rules := range entries {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" || len(rules) == 0 {
+			continue
+		}
+		clean := make([]ModelPlanAccess, 0, len(rules))
+		for _, rule := range rules {
+			pattern := strings.ToLower(strings.TrimSpace(rule.Pattern))
+			if pattern == "" {
+				continue
+			}
+			allowed := deduplicatePlans(rule.AllowedPlans)
+			denied := deduplicatePlans(rule.DeniedPlans)
+			// Mutual exclusion: if both are set, drop the rule.
+			if len(allowed) > 0 && len(denied) > 0 {
+				log.Warnf("oauth-model-plan-access[%s]: pattern %q has both allowed-plans and denied-plans, skipping", key, pattern)
+				continue
+			}
+			// At least one list must be non-empty.
+			if len(allowed) == 0 && len(denied) == 0 {
+				continue
+			}
+			clean = append(clean, ModelPlanAccess{Pattern: pattern, AllowedPlans: allowed, DeniedPlans: denied})
+		}
+		if len(clean) > 0 {
+			out[key] = clean
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// deduplicatePlans trims, lowercases, and deduplicates a plan list.
+func deduplicatePlans(plans []string) []string {
+	if len(plans) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(plans))
+	out := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		p := strings.ToLower(strings.TrimSpace(plan))
+		if p == "" {
+			continue
+		}
+		if _, exists := seen[p]; exists {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
 	}
 	if len(out) == 0 {
 		return nil

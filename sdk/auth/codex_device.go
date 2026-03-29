@@ -275,6 +275,14 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
+	attrs := make(map[string]string)
+	// Store plan in login-time auth attributes for immediate callers.
+	// Note: the synthesizer re-derives plan from JWT on disk reload,
+	// so this is only meaningful during the login session itself.
+	if planType != "" {
+		attrs["plan"] = planType
+		attrs["plan_type"] = planType
+	}
 
 	fmt.Println("Codex authentication successful")
 	if authBundle.APIKey != "" {
@@ -282,13 +290,11 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	}
 
 	return &coreauth.Auth{
-		ID:       fileName,
-		Provider: a.Provider(),
-		FileName: fileName,
-		Storage:  tokenStorage,
-		Metadata: metadata,
-		Attributes: map[string]string{
-			"plan_type": planType,
-		},
+		ID:         fileName,
+		Provider:   a.Provider(),
+		FileName:   fileName,
+		Storage:    tokenStorage,
+		Metadata:   metadata,
+		Attributes: attrs,
 	}, nil
 }

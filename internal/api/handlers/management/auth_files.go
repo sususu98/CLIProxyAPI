@@ -1035,6 +1035,26 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			}
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			auth.Runtime = existing.Runtime
+			// Copy existing ModelStates but clear 429/quota cooldowns so that
+			// re-uploading an auth file resets rate-limit timers.
+			if len(existing.ModelStates) > 0 {
+				auth.ModelStates = make(map[string]*coreauth.ModelState, len(existing.ModelStates))
+				for model, state := range existing.ModelStates {
+					if state == nil {
+						continue
+					}
+					cleaned := state.Clone()
+					if cleaned.Quota.Exceeded {
+						cleaned.Quota = coreauth.QuotaState{}
+						cleaned.Unavailable = false
+						cleaned.NextRetryAfter = time.Time{}
+						cleaned.Status = coreauth.StatusActive
+						cleaned.StatusMessage = ""
+						cleaned.LastError = nil
+					}
+					auth.ModelStates[model] = cleaned
+				}
+			}
 		}
 	}
 	return auth, nil

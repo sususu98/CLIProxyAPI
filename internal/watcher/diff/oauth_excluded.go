@@ -87,6 +87,73 @@ func DiffOAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string
 	return changes, affected
 }
 
+// DiffOAuthModelPlanAccessChanges compares OAuthModelPlanAccess maps and returns
+// human-readable changes and the list of affected provider keys.
+func DiffOAuthModelPlanAccessChanges(oldMap, newMap map[string][]config.ModelPlanAccess) ([]string, []string) {
+	oldHash := hashModelPlanAccess(oldMap)
+	newHash := hashModelPlanAccess(newMap)
+	keys := make(map[string]struct{}, len(oldHash)+len(newHash))
+	for k := range oldHash {
+		keys[k] = struct{}{}
+	}
+	for k := range newHash {
+		keys[k] = struct{}{}
+	}
+	changes := make([]string, 0, len(keys))
+	affected := make([]string, 0, len(keys))
+	for key := range keys {
+		oldH, okOld := oldHash[key]
+		newH, okNew := newHash[key]
+		switch {
+		case okOld && !okNew:
+			changes = append(changes, fmt.Sprintf("oauth-model-plan-access[%s]: removed", key))
+			affected = append(affected, key)
+		case !okOld && okNew:
+			changes = append(changes, fmt.Sprintf("oauth-model-plan-access[%s]: added", key))
+			affected = append(affected, key)
+		case okOld && okNew && oldH != newH:
+			changes = append(changes, fmt.Sprintf("oauth-model-plan-access[%s]: updated", key))
+			affected = append(affected, key)
+		}
+	}
+	sort.Strings(changes)
+	sort.Strings(affected)
+	return changes, affected
+}
+
+// hashModelPlanAccess computes a per-provider hash of ModelPlanAccess rules.
+func hashModelPlanAccess(entries map[string][]config.ModelPlanAccess) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entries))
+	for provider, rules := range entries {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" || len(rules) == 0 {
+			continue
+		}
+		parts := make([]string, 0, len(rules))
+		for _, rule := range rules {
+			pattern := strings.ToLower(strings.TrimSpace(rule.Pattern))
+			allowed := make([]string, len(rule.AllowedPlans))
+			for i, p := range rule.AllowedPlans {
+				allowed[i] = strings.ToLower(strings.TrimSpace(p))
+			}
+			sort.Strings(allowed)
+			denied := make([]string, len(rule.DeniedPlans))
+			for i, p := range rule.DeniedPlans {
+				denied[i] = strings.ToLower(strings.TrimSpace(p))
+			}
+			sort.Strings(denied)
+			parts = append(parts, pattern+":a="+strings.Join(allowed, ",")+":d="+strings.Join(denied, ","))
+		}
+		sort.Strings(parts)
+		sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+		out[key] = hex.EncodeToString(sum[:])
+	}
+	return out
+}
+
 type AmpModelMappingsSummary struct {
 	hash  string
 	count int
