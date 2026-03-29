@@ -737,7 +737,8 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 
 	models, exists := r.clientModels[clientID]
 	if !exists || len(models) == 0 {
-		return false
+		// No models registered for this client means it supports all models
+		return true
 	}
 
 	for _, id := range models {

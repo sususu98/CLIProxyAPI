@@ -2640,10 +2640,11 @@
       "max_completion_tokens": 65535,
       "thinking": {
         "min": 128,
-        "max": 32768,
+        "max": 65535,
         "dynamic_allowed": true,
         "levels": [
           "low",
+          "medium",
           "high"
         ]
       }
@@ -2678,6 +2679,26 @@
       "description": "GPT-OSS 120B (Medium)",
       "context_length": 114000,
       "max_completion_tokens": 32768
+    },
+    {
+      "id": "tab_flash_lite_preview",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Tab Flash Lite Preview",
+      "name": "tab_flash_lite_preview",
+      "description": "Tab Flash Lite Preview",
+      "max_completion_tokens": 4096
+    },
+    {
+      "id": "tab_jump_flash_lite_preview",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Tab Jump Flash Lite Preview",
+      "name": "tab_jump_flash_lite_preview",
+      "description": "Tab Jump Flash Lite Preview",
+      "max_completion_tokens": 4096
     }
   ]
 }

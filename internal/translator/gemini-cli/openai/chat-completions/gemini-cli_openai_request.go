@@ -253,7 +253,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 						fid := tc.Get("id").String()
 						fname := util.SanitizeFunctionName(tc.Get("function.name").String())
 						fargs := tc.Get("function.arguments").String()
-						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", util.SanitizeFunctionName(fname))
 						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
 						p++

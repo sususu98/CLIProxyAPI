@@ -21,14 +21,17 @@ var Scopes = []string{
 const (
 	TokenEndpoint    = "https://oauth2.googleapis.com/token"
 	AuthEndpoint     = "https://accounts.google.com/o/oauth2/v2/auth"
-	UserInfoEndpoint = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
+	UserInfoEndpoint = "https://www.googleapis.com/oauth2/v2/userinfo"
 )
 
 // Antigravity API configuration
 const (
-	APIEndpoint    = "https://cloudcode-pa.googleapis.com"
-	APIVersion     = "v1internal"
-	APIUserAgent   = "google-api-nodejs-client/9.15.1"
-	APIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	ClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+	APIEndpoint = "https://cloudcode-pa.googleapis.com"
+	APIVersion  = "v1internal"
+)
+
+// OAuth token operation identifiers (used in code exchange and token refresh requests).
+const (
+	NodeClientUA      = "google-api-nodejs-client/10.3.0"
+	NodeGoogAPIClient = "gl-node/22.21.1"
 )

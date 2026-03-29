@@ -22,6 +22,14 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+
+	// DefaultAntigravityAPIAgent is the default User-Agent for Antigravity API requests
+	// (streamGenerateContent, generateContent, countTokens, fetchAvailableModels, loadCodeAssist).
+	DefaultAntigravityAPIAgent = "antigravity/1.19.6 darwin/arm64"
+
+	// DefaultAntigravityClientAgent is the default User-Agent for Antigravity client/management
+	// requests (onboardUser, setUserSettings, fetchUserInfo).
+	DefaultAntigravityClientAgent = "antigravity/1.19.6 darwin/arm64 google-api-nodejs-client/10.3.0"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -90,6 +98,20 @@ type Config struct {
 	// When false, client signatures are used directly after normalization (bypass mode).
 	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
 
+	// AntigravityAICreditsEnabled controls whether AI Credits (overages) are used
+	// when free quota is exhausted for Antigravity accounts.
+	// When true, 429 quota_exhausted responses trigger a retry with
+	// enabledCreditTypes: ["GOOGLE_ONE_AI"] injected into the request payload.
+	// This uses the account's Google One AI Credits to pay for additional usage.
+	// When false (default), quota exhaustion is handled normally via cooldown/account switching.
+	AntigravityAICreditsEnabled *bool `yaml:"antigravity-ai-credits-enabled,omitempty" json:"antigravity-ai-credits-enabled,omitempty"`
+
+	// AntigravityUserAgents configures default User-Agent headers for Antigravity upstream API requests.
+	// Per-auth user_agent attribute (in auth file metadata) takes precedence over these global defaults.
+	AntigravityUserAgents AntigravityUserAgents `yaml:"antigravity-user-agents" json:"antigravity-user-agents"`
+
+	GeminiCLIFingerprint GeminiCLIFingerprint `yaml:"gemini-cli-fingerprint" json:"gemini-cli-fingerprint"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -147,6 +169,79 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+// AntigravityUserAgents configures default User-Agent headers for Antigravity upstream API requests.
+//
+// Resolution priority (highest to lowest):
+//  1. Per-auth user_agent attribute (auth file's "attributes.user_agent" field)
+//  2. Per-auth user_agent metadata (auth file's "metadata.user_agent" field)
+//  3. This config section (antigravity-user-agents in config.yaml)
+//  4. Compiled default constants (DefaultAntigravityAPIAgent / DefaultAntigravityClientAgent)
+//
+// Hot-reloadable: changes take effect on config file save without restarting the server.
+// Note: in-flight requests may continue using the previous UA until they complete.
+type AntigravityUserAgents struct {
+	// API is the User-Agent header for AI generation and code-assist requests (streamGenerateContent, generateContent, countTokens, fetchAvailableModels, loadCodeAssist).
+	// Default: "antigravity/1.19.6 darwin/arm64"
+	API string `yaml:"api" json:"api"`
+
+	// Client is the User-Agent header for management/user-info requests (onboardUser, setUserSettings, fetchUserInfo).
+	// Default: "antigravity/1.19.6 darwin/arm64 google-api-nodejs-client/10.3.0"
+	Client string `yaml:"client" json:"client"`
+}
+
+// ResolveAPIAgent returns the effective API User-Agent.
+// Priority: config value > DefaultAntigravityAPIAgent.
+// Callers that also need per-auth overrides should check auth.Attributes/Metadata
+// before calling this method.
+func (u AntigravityUserAgents) ResolveAPIAgent() string {
+	if v := strings.TrimSpace(u.API); v != "" {
+		return v
+	}
+	return DefaultAntigravityAPIAgent
+}
+
+// ResolveClientAgent returns the effective Client User-Agent.
+// Priority: config value > DefaultAntigravityClientAgent.
+func (u AntigravityUserAgents) ResolveClientAgent() string {
+	if v := strings.TrimSpace(u.Client); v != "" {
+		return v
+	}
+	return DefaultAntigravityClientAgent
+}
+
+// GeminiCLIFingerprint configures User-Agent and X-Goog-Api-Client headers for Gemini CLI upstream requests.
+//
+// Resolution priority (highest to lowest):
+//  1. Per-auth user_agent attribute (auth file's "attributes.user_agent" field)
+//  2. Per-auth user_agent metadata (auth file's "metadata.user_agent" field)
+//  3. This config section (gemini-cli-fingerprint in config.yaml)
+//  4. Compiled default (GeminiCLIUserAgent function + GeminiCLIApiClientHeader constant)
+//
+// Hot-reloadable: changes take effect on config file save.
+type GeminiCLIFingerprint struct {
+	// UASuffix overrides the default UA suffix (GeminiCLIUASuffix).
+	// When empty, the compiled default "google-api-nodejs-client/10.5.0" is used.
+	UASuffix string `yaml:"ua-suffix" json:"ua-suffix"`
+
+	// APIClientOverride overrides the X-Goog-Api-Client header value.
+	// When empty, the compiled default "gl-node/22.19.0" is used.
+	APIClientOverride string `yaml:"api-client-override" json:"api-client-override"`
+}
+
+// ResolveUASuffix returns the configured UA suffix, or empty string if not set.
+func (f GeminiCLIFingerprint) ResolveUASuffix() string {
+	return strings.TrimSpace(f.UASuffix)
+}
+
+// ResolveAPIClient returns the effective X-Goog-Api-Client header value.
+// Priority: config override > compiled default constant.
+func (f GeminiCLIFingerprint) ResolveAPIClient(defaultValue string) string {
+	if v := strings.TrimSpace(f.APIClientOverride); v != "" {
+		return v
+	}
+	return defaultValue
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -322,6 +417,26 @@ type PayloadFilterRule struct {
 	Models []PayloadModelRule `yaml:"models" json:"models"`
 	// Params lists JSON paths (gjson/sjson syntax) to remove from the payload.
 	Params []string `yaml:"params" json:"params"`
+	// ArrayElementFilter filters elements from arrays based on content matching.
+	// Elements matching any of the specified conditions will be removed.
+	ArrayElementFilter []ArrayElementFilter `yaml:"array-element-filter,omitempty" json:"array-element-filter,omitempty"`
+}
+
+// ArrayElementFilter defines a filter condition for array elements.
+type ArrayElementFilter struct {
+	// Path is the JSON path to the array (relative to root, e.g., "tools" or "generationConfig.tools").
+	Path string `yaml:"path" json:"path"`
+	// Match specifies the condition for elements to be filtered out.
+	Match ElementMatch `yaml:"match" json:"match"`
+}
+
+// ElementMatch defines matching criteria for array element filtering.
+type ElementMatch struct {
+	// Key is the object key that must exist in the element for it to be filtered.
+	Key string `yaml:"key" json:"key"`
+	// Value optionally specifies the value that the key must have for the element to be filtered.
+	// If omitted, any element containing the key will be filtered (has-key semantics).
+	Value any `yaml:"value,omitempty" json:"value,omitempty"`
 }
 
 // PayloadRule describes a single rule targeting a list of models with parameter updates.

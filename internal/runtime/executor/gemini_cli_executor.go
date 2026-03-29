@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -80,11 +78,13 @@ func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	applyGeminiCLIHeaders(req, "unknown")
+	applyGeminiCLIHeaders(req, "unknown", e.cfg, auth)
 	return nil
 }
 
 // HttpRequest injects Gemini CLI credentials into the request and executes it.
+// It uses a whitelist approach: all incoming headers are stripped and only
+// the minimum set required by the Gemini CLI protocol is explicitly set.
 func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("gemini-cli executor: request is nil")
@@ -93,6 +93,20 @@ func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
+
+	// --- Whitelist: save only the headers we need from the original request ---
+	contentType := httpReq.Header.Get("Content-Type")
+
+	// Wipe ALL incoming headers to prevent client fingerprint leakage
+	for k := range httpReq.Header {
+		delete(httpReq.Header, k)
+	}
+
+	// --- Set only the headers Gemini CLI actually sends ---
+	if contentType != "" {
+		httpReq.Header.Set("Content-Type", contentType)
+	}
+
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
@@ -105,6 +119,15 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return resp, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return resp, err
+		}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
@@ -115,7 +138,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
 	originalPayloadSource := req.Payload
@@ -158,7 +180,13 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	var lastStatus int
 	var lastBody []byte
+	var noCapacityAttempt int
+	const maxNoCapacityAttempts = 3
 
+	// NOTE: goto modelLoop restarts the for loop from idx=0. This works correctly
+	// when models has only one element (current behavior). If fallback models are
+	// enabled in cliPreviewFallbackOrder, the retry logic should be reconsidered.
+modelLoop:
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		if action == "countTokens" {
@@ -188,8 +216,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP, attemptModel)
-		reqHTTP.Header.Set("Accept", "application/json")
+		applyGeminiCLIHeaders(reqHTTP, attemptModel, e.cfg, auth)
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -240,6 +267,23 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			continue
 		}
 
+		if geminiShouldRetryNoCapacity(httpResp.StatusCode, data) {
+			if retryAfter := ParseAndClampRetryDelay(data); retryAfter != nil {
+				log.Debugf("gemini cli executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+				return resp, statusErr{code: httpResp.StatusCode, msg: string(data), retryAfter: retryAfter}
+			}
+			if noCapacityAttempt < maxNoCapacityAttempts {
+				delay := DefaultNoCapacityRetryDelay(noCapacityAttempt)
+				log.Debugf("gemini cli executor: no capacity for model %s, retrying in %s (attempt %d/%d)", attemptModel, delay, noCapacityAttempt+1, maxNoCapacityAttempts)
+				if errWait := geminiWait(ctx, delay); errWait != nil {
+					return resp, errWait
+				}
+				noCapacityAttempt++
+				goto modelLoop
+			}
+			log.Debug("gemini cli executor: no capacity, max retry attempts reached")
+		}
+
 		err = newGeminiStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
@@ -259,6 +303,15 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return nil, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return nil, err
+		}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
@@ -269,7 +322,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
 	originalPayloadSource := req.Payload
@@ -306,7 +358,13 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	var lastStatus int
 	var lastBody []byte
+	var noCapacityAttempt int
+	const maxNoCapacityAttempts = 3
 
+	// NOTE: goto modelLoop restarts the for loop from idx=0. This works correctly
+	// when models has only one element (current behavior). If fallback models are
+	// enabled in cliPreviewFallbackOrder, the retry logic should be reconsidered.
+modelLoop:
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		payload = setJSONField(payload, "project", projectID)
@@ -333,8 +391,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP, attemptModel)
-		reqHTTP.Header.Set("Accept", "text/event-stream")
+		applyGeminiCLIHeaders(reqHTTP, attemptModel, e.cfg, auth)
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -375,6 +432,22 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					log.Debug("gemini cli executor: rate limited, no additional fallback model")
 				}
 				continue
+			}
+			if geminiShouldRetryNoCapacity(httpResp.StatusCode, data) {
+				if retryAfter := ParseAndClampRetryDelay(data); retryAfter != nil {
+					log.Debugf("gemini cli executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+					return nil, statusErr{code: httpResp.StatusCode, msg: string(data), retryAfter: retryAfter}
+				}
+				if noCapacityAttempt < maxNoCapacityAttempts {
+					delay := DefaultNoCapacityRetryDelay(noCapacityAttempt)
+					log.Debugf("gemini cli executor: no capacity for model %s, retrying in %s (attempt %d/%d)", attemptModel, delay, noCapacityAttempt+1, maxNoCapacityAttempts)
+					if errWait := geminiWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					noCapacityAttempt++
+					goto modelLoop
+				}
+				log.Debug("gemini cli executor: no capacity, max retry attempts reached")
 			}
 			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
@@ -455,13 +528,21 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 // CountTokens counts tokens for the given request using the Gemini CLI API.
 func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if err := rejectInvalidClaudeMessagesRequest(req.Payload); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		if err := rejectUnsupportedClaudeImages(req.Payload); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+	}
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 
-	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
 	models := cliPreviewFallbackOrder(baseModel)
@@ -481,7 +562,13 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 
 	var lastStatus int
 	var lastBody []byte
+	var noCapacityAttempt int
+	const maxNoCapacityAttempts = 3
 
+	// NOTE: goto modelLoop restarts the for loop from idx=0. This works correctly
+	// when models has only one element (current behavior). If fallback models are
+	// enabled in cliPreviewFallbackOrder, the retry logic should be reconsidered.
+modelLoop:
 	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
 	// Gemini CLI endpoint when iterating fallback variants.
 	for range models {
@@ -514,8 +601,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
 		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		applyGeminiCLIHeaders(reqHTTP, baseModel)
-		reqHTTP.Header.Set("Accept", "application/json")
+		applyGeminiCLIHeaders(reqHTTP, baseModel, e.cfg, auth)
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -551,6 +637,22 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		if resp.StatusCode == 429 {
 			log.Debugf("gemini cli executor: rate limited, retrying with next model")
 			continue
+		}
+		if geminiShouldRetryNoCapacity(resp.StatusCode, data) {
+			if retryAfter := ParseAndClampRetryDelay(data); retryAfter != nil {
+				log.Debugf("gemini cli executor: no capacity with retryDelay %s, returning to conductor", *retryAfter)
+				return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(data), retryAfter: retryAfter}
+			}
+			if noCapacityAttempt < maxNoCapacityAttempts {
+				delay := DefaultNoCapacityRetryDelay(noCapacityAttempt)
+				log.Debugf("gemini cli executor: no capacity, retrying in %s (attempt %d/%d)", delay, noCapacityAttempt+1, maxNoCapacityAttempts)
+				if errWait := geminiWait(ctx, delay); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
+				noCapacityAttempt++
+				goto modelLoop
+			}
+			log.Debug("gemini cli executor: no capacity, max retry attempts reached")
 		}
 		break
 	}
@@ -736,12 +838,39 @@ func stringValue(m map[string]any, key string) string {
 	return ""
 }
 
-// applyGeminiCLIHeaders sets required headers for the Gemini CLI upstream.
-// User-Agent is always forced to the GeminiCLI format regardless of the client's value,
-// so that upstream identifies the request as a native GeminiCLI client.
-func applyGeminiCLIHeaders(r *http.Request, model string) {
-	r.Header.Set("User-Agent", misc.GeminiCLIUserAgent(model))
-	r.Header.Set("X-Goog-Api-Client", misc.GeminiCLIApiClientHeader)
+// resolveGeminiCLIUserAgent resolves the User-Agent for Gemini CLI upstream requests.
+// Priority: auth attrs > auth metadata > config suffix > default (no suffix).
+func resolveGeminiCLIUserAgent(cfg *config.Config, auth *cliproxyauth.Auth, model string) string {
+	if auth != nil {
+		if auth.Attributes != nil {
+			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+				return ua
+			}
+		}
+		if auth.Metadata != nil {
+			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
+				return strings.TrimSpace(ua)
+			}
+		}
+	}
+	var suffix string
+	if cfg != nil {
+		suffix = cfg.GeminiCLIFingerprint.ResolveUASuffix()
+	}
+	return misc.GeminiCLIUserAgentWithSuffix(model, suffix)
+}
+
+// resolveGeminiCLIAPIClient resolves the X-Goog-Api-Client for Gemini CLI upstream requests.
+func resolveGeminiCLIAPIClient(cfg *config.Config) string {
+	if cfg != nil {
+		return cfg.GeminiCLIFingerprint.ResolveAPIClient(misc.GeminiCLIApiClientHeader)
+	}
+	return misc.GeminiCLIApiClientHeader
+}
+
+func applyGeminiCLIHeaders(r *http.Request, model string, cfg *config.Config, auth *cliproxyauth.Auth) {
+	r.Header.Set("User-Agent", resolveGeminiCLIUserAgent(cfg, auth, model))
+	r.Header.Set("X-Goog-Api-Client", resolveGeminiCLIAPIClient(cfg))
 }
 
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
@@ -842,55 +971,31 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 
-// parseRetryDelay extracts the retry delay from a Google API 429 error response.
-// The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
-// Returns the parsed duration or an error if it cannot be determined.
-func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
-	// Try to parse the retryDelay from the error response
-	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
-	details := gjson.GetBytes(errorBody, "error.details")
-	if details.Exists() && details.IsArray() {
-		for _, detail := range details.Array() {
-			typeVal := detail.Get("@type").String()
-			if typeVal == "type.googleapis.com/google.rpc.RetryInfo" {
-				retryDelay := detail.Get("retryDelay").String()
-				if retryDelay != "" {
-					// Parse duration string like "0.847655010s"
-					duration, err := time.ParseDuration(retryDelay)
-					if err != nil {
-						return nil, fmt.Errorf("failed to parse duration")
-					}
-					return &duration, nil
-				}
-			}
-		}
+// parseRetryDelay is now defined in retry_helpers.go and shared across executors.
 
-		// Fallback: try ErrorInfo.metadata.quotaResetDelay (e.g., "373.801628ms")
-		for _, detail := range details.Array() {
-			typeVal := detail.Get("@type").String()
-			if typeVal == "type.googleapis.com/google.rpc.ErrorInfo" {
-				quotaResetDelay := detail.Get("metadata.quotaResetDelay").String()
-				if quotaResetDelay != "" {
-					duration, err := time.ParseDuration(quotaResetDelay)
-					if err == nil {
-						return &duration, nil
-					}
-				}
-			}
-		}
+// geminiShouldRetryNoCapacity checks if the error indicates a transient no-capacity condition.
+func geminiShouldRetryNoCapacity(statusCode int, body []byte) bool {
+	if statusCode != http.StatusServiceUnavailable {
+		return false
 	}
-
-	// Fallback: parse from error.message "Your quota will reset after Xs."
-	message := gjson.GetBytes(errorBody, "error.message").String()
-	if message != "" {
-		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
-		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
-			seconds, err := strconv.Atoi(matches[1])
-			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
-			}
-		}
+	if len(body) == 0 {
+		return false
 	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "no capacity available") || strings.Contains(msg, "model_capacity_exhausted")
+}
 
-	return nil, fmt.Errorf("no RetryInfo found")
+// geminiWait waits for the specified duration or until context is cancelled.
+func geminiWait(ctx context.Context, wait time.Duration) error {
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
