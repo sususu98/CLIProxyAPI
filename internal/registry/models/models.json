@@ -2607,38 +2607,6 @@
       }
     },
     {
-      "id": "gemini-2.5-flash",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 2.5 Flash",
-      "name": "gemini-2.5-flash",
-      "description": "Gemini 2.5 Flash",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "max": 24576,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "gemini-2.5-flash-lite",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 2.5 Flash Lite",
-      "name": "gemini-2.5-flash-lite",
-      "description": "Gemini 2.5 Flash Lite",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "max": 24576,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
       "id": "gemini-3-flash",
       "object": "model",
       "owned_by": "antigravity",
@@ -2714,6 +2682,29 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "gemini-3.1-flash-lite",
+      "description": "Gemini 3.1 Flash Lite",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
           "high"
         ]
       }
