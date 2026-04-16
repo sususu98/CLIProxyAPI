@@ -80,15 +80,6 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
-	// TTFTTimeout defines the global Time-To-First-Token timeout for streaming requests, in seconds.
-	// If no first token (including thinking tokens) is received within this duration, the request
-	// is aborted and retried with a different credential/model. 0 = disabled (default).
-	TTFTTimeout int `yaml:"ttft-timeout" json:"ttft-timeout"`
-	// TTFTTimeoutModels provides per-model TTFT timeout overrides, in seconds.
-	// Keys are client-facing model names (the model name in the request, before alias resolution).
-	// Values override the global ttft-timeout for that specific model.
-	TTFTTimeoutModels map[string]int `yaml:"ttft-timeout-models,omitempty" json:"ttft-timeout-models,omitempty"`
-
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
