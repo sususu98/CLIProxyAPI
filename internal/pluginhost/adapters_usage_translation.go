@@ -180,6 +180,9 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			ClientType:     record.Session.ClientType,
 			ThreadID:       record.Session.ThreadID,
 			ParentThreadID: record.Session.ParentThreadID,
+			RequestKind:    record.Session.RequestKind,
+			ThreadSource:   record.Session.ThreadSource,
+			TurnID:         record.Session.TurnID,
 		},
 	})
 }

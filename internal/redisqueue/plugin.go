@@ -126,6 +126,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ClientType:          strings.TrimSpace(sessionInfo.ClientType),
 		ThreadID:            strings.TrimSpace(sessionInfo.ThreadID),
 		ParentThreadID:      strings.TrimSpace(sessionInfo.ParentThreadID),
+		RequestKind:         strings.TrimSpace(sessionInfo.RequestKind),
+		ThreadSource:        strings.TrimSpace(sessionInfo.ThreadSource),
+		TurnID:              strings.TrimSpace(sessionInfo.TurnID),
 	})
 	if err != nil {
 		return
@@ -148,13 +151,19 @@ type queuedUsageDetail struct {
 	ReasoningEffort   string                   `json:"reasoning_effort"`
 	// Session fields group requests into one client conversation. They are omitted
 	// when no session could be resolved, so older consumers stay unaffected.
-	SessionID           string `json:"session_id,omitempty"`
-	SessionSource       string `json:"session_source,omitempty"`
-	SessionConfidence   string `json:"session_confidence,omitempty"`
-	SessionScope        string `json:"session_scope,omitempty"`
-	ClientType          string `json:"client_type,omitempty"`
-	ThreadID            string `json:"thread_id,omitempty"`
-	ParentThreadID      string `json:"parent_thread_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	SessionSource     string `json:"session_source,omitempty"`
+	SessionConfidence string `json:"session_confidence,omitempty"`
+	SessionScope      string `json:"session_scope,omitempty"`
+	ClientType        string `json:"client_type,omitempty"`
+	ThreadID          string `json:"thread_id,omitempty"`
+	ParentThreadID    string `json:"parent_thread_id,omitempty"`
+	// RequestKind, ThreadSource and TurnID let a session timeline separate real
+	// conversation turns from housekeeping requests such as compaction or title
+	// generation, and group the upstream requests belonging to one client turn.
+	RequestKind         string `json:"request_kind,omitempty"`
+	ThreadSource        string `json:"thread_source,omitempty"`
+	TurnID              string `json:"turn_id,omitempty"`
 	ServiceTier         string `json:"service_tier"`
 	ResponseServiceTier string `json:"response_service_tier,omitempty"`
 }

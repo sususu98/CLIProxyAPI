@@ -67,7 +67,9 @@ func declaredClientType(headers http.Header) string {
 func isClaudeCode(headers http.Header, userAgent string) bool {
 	claudeCLI := strings.HasPrefix(userAgent, "claude-cli/")
 	sessionHeader := rawHeader(headers, "X-Claude-Code-Session-Id") != ""
-	cliApp := strings.EqualFold(strings.TrimSpace(rawHeader(headers, "X-App")), "cli")
+	// Background requests report "cli-bg" instead of "cli".
+	xApp := strings.TrimSpace(rawHeader(headers, "X-App"))
+	cliApp := strings.EqualFold(xApp, "cli") || strings.EqualFold(xApp, "cli-bg")
 	anthropicBeta := rawHeader(headers, "Anthropic-Beta") != ""
 
 	signals := 0

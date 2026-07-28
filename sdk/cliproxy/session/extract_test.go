@@ -94,11 +94,37 @@ func TestExtractClassificationAndAliases(t *testing.T) {
 			wantScope:      ScopeSession,
 		},
 		{
-			name:           "pi responses client request id",
+			// The header tracks the current thread, so a real root identifier always
+			// wins and the header contributes no alias. pi sends prompt_cache_key
+			// with the same value, which is what routing uses instead.
+			name:           "client request id yields to a real root identifier",
+			headers:        http.Header{"X-Client-Request-Id": {"pi-1"}},
+			payload:        `{"prompt_cache_key":"pi-1"}`,
+			wantID:         "pck:pi-1",
+			wantAliases:    nil,
+			wantSource:     SourcePromptCacheKey,
+			wantConfidence: ConfidenceMedium,
+			wantScope:      ScopeSession,
+		},
+		{
+			// A client that sends nothing else still gets affinity from it.
+			name:           "client request id is the last-resort root",
 			headers:        http.Header{"X-Client-Request-Id": {"pi-1"}},
 			wantID:         "clientreq:pi-1",
 			wantSource:     SourceClientRequestID,
 			wantConfidence: ConfidenceMedium,
+			wantScope:      ScopeSession,
+		},
+		{
+			// OpenCode sub-agent: its own session plus the root in the parent header.
+			// The parent shares the "header:" prefix so both requests land in one
+			// alias group and therefore on one credential.
+			name:           "opencode subagent joins the parent session alias group",
+			headers:        http.Header{"X-Session-Id": {"ses_child"}, "X-Session-Affinity": {"ses_child"}, "X-Parent-Session-Id": {"ses_root"}},
+			wantID:         "header:ses_child",
+			wantAliases:    []string{"affinity:ses_child", "header:ses_root"},
+			wantSource:     SourceClientNativeHeader,
+			wantConfidence: ConfidenceHigh,
 			wantScope:      ScopeSession,
 		},
 		{
@@ -308,6 +334,233 @@ func TestIdentityIDsDeduplication(t *testing.T) {
 	if !equalStrings(got, want) {
 		t.Fatalf("Identity.IDs() = %#v, want %#v", got, want)
 	}
+}
+
+// TestExtractOpenCodeSubagentSharesRootIdentifier locks in the routing outcome:
+// the parent and its sub-agent must share at least one identifier so the affinity
+// cache resolves them to a single credential.
+func TestExtractOpenCodeSubagentSharesRootIdentifier(t *testing.T) {
+	parent := Extract(http.Header{
+		"X-Session-Id":       {"ses_root"},
+		"X-Session-Affinity": {"ses_root"},
+		"User-Agent":         {"opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+	}, nil, nil)
+	child := Extract(http.Header{
+		"X-Session-Id":        {"ses_child"},
+		"X-Session-Affinity":  {"ses_child"},
+		"X-Parent-Session-Id": {"ses_root"},
+		"User-Agent":          {"opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+	}, nil, nil)
+
+	shared := ""
+	for _, parentID := range parent.IDs() {
+		for _, childID := range child.IDs() {
+			if parentID == childID {
+				shared = parentID
+			}
+		}
+	}
+	if shared == "" {
+		t.Fatalf("parent %v and subagent %v share no identifier, so they would bind to different credentials", parent.IDs(), child.IDs())
+	}
+	if child.ParentThreadID != "ses_root" {
+		t.Fatalf("ParentThreadID = %q, want ses_root", child.ParentThreadID)
+	}
+	if child.ThreadID != "" {
+		t.Fatalf("ThreadID = %q, want empty: OpenCode reports no thread header", child.ThreadID)
+	}
+}
+
+// TestExtractClaudeCodeSubagentThreads mirrors a captured depth-2 Claude Code run:
+// every level repeats the root session, the main agent sends no agent identifier,
+// and the parent identifier only appears from depth 2 onwards.
+func TestExtractClaudeCodeSubagentThreads(t *testing.T) {
+	const root = "5fea96b2-0000-4000-8000-000000000000"
+	base := func() http.Header {
+		return http.Header{
+			"X-Claude-Code-Session-Id": {root},
+			"X-App":                    {"cli"},
+			"Anthropic-Beta":           {"claude-code-20250219"},
+			"User-Agent":               {"claude-cli/2.1.220 (external, sdk-cli)"},
+		}
+	}
+
+	main := Extract(base(), nil, nil)
+	if main.ID != "claude:"+root {
+		t.Fatalf("main ID = %q, want claude:%s", main.ID, root)
+	}
+	if main.ThreadID != "" || main.ParentThreadID != "" {
+		t.Fatalf("main agent reported thread %q parent %q, want both empty", main.ThreadID, main.ParentThreadID)
+	}
+
+	depth1Headers := base()
+	depth1Headers.Set("X-Claude-Code-Agent-Id", "a0f476550f303bf2d")
+	depth1 := Extract(depth1Headers, nil, nil)
+	if depth1.ID != "claude:"+root {
+		t.Fatalf("depth-1 ID = %q, want claude:%s", depth1.ID, root)
+	}
+	if depth1.ThreadID != "a0f476550f303bf2d" {
+		t.Fatalf("depth-1 ThreadID = %q, want a0f476550f303bf2d", depth1.ThreadID)
+	}
+	if depth1.ParentThreadID != "" {
+		t.Fatalf("depth-1 ParentThreadID = %q, want empty", depth1.ParentThreadID)
+	}
+
+	depth2Headers := base()
+	depth2Headers.Set("X-Claude-Code-Agent-Id", "a15f3b017b93ec1d8")
+	depth2Headers.Set("X-Claude-Code-Parent-Agent-Id", "a0f476550f303bf2d")
+	depth2 := Extract(depth2Headers, nil, nil)
+	if depth2.ID != "claude:"+root {
+		t.Fatalf("depth-2 ID = %q, want claude:%s", depth2.ID, root)
+	}
+	if depth2.ThreadID != "a15f3b017b93ec1d8" {
+		t.Fatalf("depth-2 ThreadID = %q, want a15f3b017b93ec1d8", depth2.ThreadID)
+	}
+	if depth2.ParentThreadID != "a0f476550f303bf2d" {
+		t.Fatalf("depth-2 ParentThreadID = %q, want a0f476550f303bf2d", depth2.ParentThreadID)
+	}
+}
+
+// TestExtractCodexSubagentKeepsRootSession mirrors a captured Codex sub-agent turn:
+// session-id and prompt_cache_key stay on the root while thread-id moves to the
+// child, and x-client-request-id follows the thread rather than the session.
+func TestExtractCodexSubagentKeepsRootSession(t *testing.T) {
+	const root = "019fa90b-31a4-7841-b252-0a2d5dafbbdc"
+	const childThread = "019fa90b-3219-73d2-9aad-9de97611969e"
+
+	got := Extract(http.Header{
+		"Session-Id":               {root},
+		"Thread-Id":                {childThread},
+		"X-Codex-Parent-Thread-Id": {root},
+		"X-Client-Request-Id":      {childThread},
+		"X-Openai-Subagent":        {"collab_spawn"},
+		"User-Agent":               {"codex_exec/0.145.0 (Mac OS 26.5.2; arm64)"},
+	}, []byte(`{"prompt_cache_key":"`+root+`"}`), nil)
+
+	if got.ID != "codex:"+root {
+		t.Fatalf("ID = %q, want codex:%s", got.ID, root)
+	}
+	if got.ThreadID != childThread {
+		t.Fatalf("ThreadID = %q, want %s", got.ThreadID, childThread)
+	}
+	if got.ParentThreadID != root {
+		t.Fatalf("ParentThreadID = %q, want %s", got.ParentThreadID, root)
+	}
+	for _, id := range got.IDs() {
+		if strings.Contains(id, childThread) {
+			t.Fatalf("thread identifier %q leaked into the root alias group %v", id, got.IDs())
+		}
+	}
+}
+
+// TestExtractWithoutAnyRootSignalStaysZero pins the contract that observation
+// fields never manufacture a session. A request with no root identifier must still
+// report IsZero and contribute no routing identifier, even when the client type,
+// turn metadata and request kind are all recognised.
+func TestExtractWithoutAnyRootSignalStaysZero(t *testing.T) {
+	got := Extract(http.Header{
+		"User-Agent":            {"codex_exec/0.145.0 (Mac OS 26.5.2; arm64)"},
+		"X-Codex-Turn-Metadata": {`{"request_kind":"prewarm","thread_source":"user","turn_id":"019fa90b-3234-73d2-a061-0622e5f8c57c"}`},
+		"X-App":                 {"cli-bg"},
+	}, nil, nil)
+
+	if !got.IsZero() {
+		t.Fatalf("IsZero() = false for identity %#v, want true", got)
+	}
+	if got.ID != "" {
+		t.Fatalf("ID = %q, want empty", got.ID)
+	}
+	if ids := got.IDs(); len(ids) != 0 {
+		t.Fatalf("IDs() = %#v, want none: observation fields must not create a routing key", ids)
+	}
+	// The observations are still reported for logging.
+	if got.ClientType != ClientTypeCodex {
+		t.Fatalf("ClientType = %q, want %q", got.ClientType, ClientTypeCodex)
+	}
+	if got.RequestKind != "prewarm" {
+		t.Fatalf("RequestKind = %q, want prewarm", got.RequestKind)
+	}
+}
+
+// TestExtractTurnObservations covers the observation-only fields: they are read
+// from what the client reports, bounded, and never promoted to a session alias.
+func TestExtractTurnObservations(t *testing.T) {
+	const root = "019fa90b-31a4-7841-b252-0a2d5dafbbdc"
+	const childThread = "019fa90b-3219-73d2-9aad-9de97611969e"
+	const turnID = "019fa90b-3234-73d2-a061-0622e5f8c57c"
+
+	t.Run("codex subagent turn", func(t *testing.T) {
+		metadata := `{"installation_id":"i","session_id":"` + root + `","thread_id":"` + childThread +
+			`","turn_id":"` + turnID + `","request_kind":"turn","parent_thread_id":"` + root +
+			`","subagent_kind":"thread_spawn","thread_source":"subagent"}`
+		got := Extract(http.Header{
+			"Session-Id":            {root},
+			"Thread-Id":             {childThread},
+			"X-Codex-Turn-Metadata": {metadata},
+			"User-Agent":            {"codex_exec/0.145.0 (Mac OS 26.5.2; arm64)"},
+		}, nil, nil)
+
+		if got.RequestKind != "turn" {
+			t.Fatalf("RequestKind = %q, want turn", got.RequestKind)
+		}
+		if got.ThreadSource != "subagent" {
+			t.Fatalf("ThreadSource = %q, want subagent", got.ThreadSource)
+		}
+		if got.TurnID != turnID {
+			t.Fatalf("TurnID = %q, want %s", got.TurnID, turnID)
+		}
+		for _, id := range got.IDs() {
+			if strings.Contains(id, turnID) {
+				t.Fatalf("turn identifier leaked into the alias group %v", got.IDs())
+			}
+		}
+	})
+
+	t.Run("codex housekeeping kinds are reported verbatim", func(t *testing.T) {
+		for _, kind := range []string{"compact", "review", "title", "prewarm"} {
+			got := Extract(http.Header{
+				"Session-Id":            {root},
+				"X-Codex-Turn-Metadata": {`{"request_kind":"` + kind + `","thread_source":"user"}`},
+			}, nil, nil)
+			if got.RequestKind != kind {
+				t.Fatalf("RequestKind = %q, want %q", got.RequestKind, kind)
+			}
+		}
+	})
+
+	t.Run("claude code background", func(t *testing.T) {
+		got := Extract(http.Header{
+			"X-Claude-Code-Session-Id": {root},
+			"X-App":                    {"cli-bg"},
+			"Anthropic-Beta":           {"claude-code-20250219"},
+		}, nil, nil)
+		if got.RequestKind != RequestKindBackground {
+			t.Fatalf("RequestKind = %q, want %q", got.RequestKind, RequestKindBackground)
+		}
+	})
+
+	t.Run("hostile metadata is rejected", func(t *testing.T) {
+		cases := []struct{ name, metadata string }{
+			{"not json", `not-json`},
+			{"control characters", `{"request_kind":"tu\u0001rn"}`},
+			{"oversized value", `{"request_kind":"` + strings.Repeat("k", observationValueMaxLength+1) + `"}`},
+			{"oversized payload", `{"request_kind":"turn","pad":"` + strings.Repeat("p", codexTurnMetadataMaxBytes) + `"}`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := Extract(http.Header{
+					"Session-Id":            {root},
+					"X-Codex-Turn-Metadata": {tc.metadata},
+				}, nil, nil)
+				if got.ID != "codex:"+root {
+					t.Fatalf("ID = %q, want codex:%s", got.ID, root)
+				}
+				if got.RequestKind != "" {
+					t.Fatalf("RequestKind = %q, want empty", got.RequestKind)
+				}
+			})
+		}
+	})
 }
 
 func equalStrings(left, right []string) bool {

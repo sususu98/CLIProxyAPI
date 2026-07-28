@@ -34,7 +34,13 @@ const (
 	SourceClientNativeHeader = "client_native_header"
 	// SourceMetadataUserID is a Claude Code session parsed out of metadata.user_id.
 	SourceMetadataUserID = "metadata_user_id"
-	// SourceClientRequestID is the pi Responses x-client-request-id header.
+	// SourceClientRequestID is the x-client-request-id header, used only when a
+	// request carries no other explicit root identifier.
+	//
+	// Live captures show the header tracks the current thread, not the root session:
+	// a Codex sub-agent sends its own thread identifier there while session-id stays
+	// on the root. Collecting it alongside a real root identifier would add one
+	// throwaway alias per sub-agent to the root alias group, so it is a last resort.
 	SourceClientRequestID = "client_request_id"
 	// SourceBodySession is an explicit session field in the request body.
 	SourceBodySession = "body_session"
@@ -74,6 +80,17 @@ type Identity struct {
 	ThreadID string
 	// ParentThreadID carries the parent thread identifier, for observability.
 	ParentThreadID string
+	// RequestKind names what the client is doing, when it says so: Codex reports
+	// turn, compact, review, title, prewarm and similar, and Claude Code reports
+	// background work. It lets a session timeline separate real conversation turns
+	// from housekeeping requests. Observability only.
+	RequestKind string
+	// ThreadSource names where the thread came from, when the client says so:
+	// user, subagent, fork and similar. Observability only.
+	ThreadSource string
+	// TurnID identifies one client turn, which may span several upstream requests.
+	// It changes every turn and is never a session identifier. Observability only.
+	TurnID string
 	// ClientProvided reports whether the client sent the representative identifier itself.
 	ClientProvided bool
 }

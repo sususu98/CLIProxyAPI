@@ -72,6 +72,13 @@ type SessionInfo struct {
 	// ThreadID and ParentThreadID describe sub-agent and fork relationships.
 	ThreadID       string
 	ParentThreadID string
+	// RequestKind names what the client reported this request is: a conversation
+	// turn, or housekeeping such as compaction, title generation or background work.
+	RequestKind string
+	// ThreadSource names where the thread came from: user, subagent, fork.
+	ThreadSource string
+	// TurnID identifies one client turn, which may span several upstream requests.
+	TurnID string
 }
 
 // IsZero reports whether no session information was resolved.

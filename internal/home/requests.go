@@ -24,6 +24,13 @@ type DispatchSession struct {
 	// relationships. They never replace the root session.
 	ThreadID       string `json:"thread_id,omitempty"`
 	ParentThreadID string `json:"parent_thread_id,omitempty"`
+	// RequestKind, ThreadSource and TurnID are observability fields the client
+	// reported about this request: what kind of work it is (a conversation turn
+	// versus compaction, title generation or other housekeeping), where the thread
+	// came from, and which client turn it belongs to. They never affect routing.
+	RequestKind  string `json:"request_kind,omitempty"`
+	ThreadSource string `json:"thread_source,omitempty"`
+	TurnID       string `json:"turn_id,omitempty"`
 	// ClientProvided reports whether the client sent the identifier itself.
 	ClientProvided bool `json:"client_provided,omitempty"`
 }

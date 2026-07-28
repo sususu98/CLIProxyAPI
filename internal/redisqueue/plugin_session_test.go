@@ -21,6 +21,9 @@ func TestUsageQueuePluginPayloadIncludesSessionFields(t *testing.T) {
 				ClientType:     "codex",
 				ThreadID:       "thread-1",
 				ParentThreadID: "thread-0",
+				RequestKind:    "compact",
+				ThreadSource:   "subagent",
+				TurnID:         "019fa90b-3234-73d2-a061-0622e5f8c57c",
 			},
 		})
 
@@ -32,6 +35,10 @@ func TestUsageQueuePluginPayloadIncludesSessionFields(t *testing.T) {
 		requireStringField(t, payload, "client_type", "codex")
 		requireStringField(t, payload, "thread_id", "thread-1")
 		requireStringField(t, payload, "parent_thread_id", "thread-0")
+		// Home folds housekeeping requests out of a session timeline using these.
+		requireStringField(t, payload, "request_kind", "compact")
+		requireStringField(t, payload, "thread_source", "subagent")
+		requireStringField(t, payload, "turn_id", "019fa90b-3234-73d2-a061-0622e5f8c57c")
 	})
 }
 
@@ -65,6 +72,7 @@ func TestUsageQueuePluginOmitsSessionFieldsWhenUnresolved(t *testing.T) {
 		for _, field := range []string{
 			"session_id", "session_source", "session_confidence",
 			"session_scope", "client_type", "thread_id", "parent_thread_id",
+			"request_kind", "thread_source", "turn_id",
 		} {
 			requireMissingField(t, payload, field)
 		}

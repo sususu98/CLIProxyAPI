@@ -16,9 +16,14 @@ const gatewaySessionHeader = "X-Gateway-Session-Id"
 
 // threadHeaders and parentThreadHeaders are observability signals. They describe a
 // thread or sub-agent inside a conversation and never replace a root session.
+//
+// Claude Code sends X-Claude-Code-Agent-Id only for sub-agents: the main agent
+// omits it entirely, so its presence identifies a sub-agent request. The parent
+// header appears one level deeper still, because a depth-1 sub-agent's parent is
+// the main agent, which has no agent identifier of its own.
 var (
-	threadHeaders       = []string{"X-Gateway-Thread-Id", "Thread-Id", "Thread_id"}
-	parentThreadHeaders = []string{"X-Gateway-Parent-Thread-Id", "X-Codex-Parent-Thread-Id", "X-Parent-Session-Id"}
+	threadHeaders       = []string{"X-Gateway-Thread-Id", "Thread-Id", "Thread_id", "X-Claude-Code-Agent-Id"}
+	parentThreadHeaders = []string{"X-Gateway-Parent-Thread-Id", "X-Codex-Parent-Thread-Id", "X-Claude-Code-Parent-Agent-Id", "X-Parent-Session-Id"}
 )
 
 // Extract resolves one structured session identity from explicit client signals,
@@ -36,17 +41,69 @@ var (
 //  5. stable hash from initial message content
 func Extract(headers http.Header, payload []byte, metadata map[string]any) Identity {
 	identity := extractRoot(headers, payload, metadata)
-	if identity.ID == "" {
-		return Identity{
-			ClientType:     DetectClientType(headers),
-			ThreadID:       firstHeaderValue(headers, threadHeaders...),
-			ParentThreadID: firstHeaderValue(headers, parentThreadHeaders...),
-		}
-	}
 	identity.ClientType = DetectClientType(headers)
 	identity.ThreadID = firstHeaderValue(headers, threadHeaders...)
 	identity.ParentThreadID = firstHeaderValue(headers, parentThreadHeaders...)
+	attachTurnObservations(&identity, headers)
 	return identity
+}
+
+// codexTurnMetadataHeader carries Codex per-turn observability fields as a JSON
+// object. It is never a session identifier: turn_id changes every turn, and the
+// session and thread identifiers it repeats are already read from their own headers.
+const codexTurnMetadataHeader = "X-Codex-Turn-Metadata"
+
+// codexTurnMetadataMaxBytes bounds how much client-supplied JSON is parsed.
+const codexTurnMetadataMaxBytes = 4096
+
+// observationValueMaxLength bounds enum-like observation values so a client cannot
+// push arbitrary length into logs and Home payloads.
+const observationValueMaxLength = 64
+
+// RequestKindBackground marks work a client runs outside the foreground conversation.
+// Codex reports its own kinds verbatim (turn, compact, review, title, prewarm, ...);
+// Claude Code only distinguishes background requests, via X-App.
+const RequestKindBackground = "background"
+
+// attachTurnObservations fills the observation-only fields describing what kind of
+// request this is and where the thread came from. These never affect routing.
+func attachTurnObservations(identity *Identity, headers http.Header) {
+	if headers == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(rawHeader(headers, "X-App")), "cli-bg") {
+		identity.RequestKind = RequestKindBackground
+	}
+
+	raw := rawHeader(headers, codexTurnMetadataHeader)
+	if raw == "" || len(raw) > codexTurnMetadataMaxBytes || !gjson.Valid(raw) {
+		return
+	}
+	parsed := gjson.Parse(raw)
+	if kind := normalizeObservationValue(parsed.Get("request_kind").String()); kind != "" {
+		identity.RequestKind = kind
+	}
+	if source := normalizeObservationValue(parsed.Get("thread_source").String()); source != "" {
+		identity.ThreadSource = source
+	}
+	if turnID := NormalizeExplicitID(parsed.Get("turn_id").String()); turnID != "" {
+		identity.TurnID = turnID
+	}
+}
+
+// normalizeObservationValue accepts a short enum-like token and rejects anything
+// that could corrupt a log line or grow a payload.
+func normalizeObservationValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" || len(value) > observationValueMaxLength {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return value
 }
 
 type rawSignal struct {
@@ -146,10 +203,15 @@ func extractExplicitRootSignals(headers http.Header, payload []byte) []rawSignal
 	appendHeader("X-Opencode-Session", "opencode:", SourceClientNativeHeader, ConfidenceHigh)
 	appendHeader("X-Session-ID", "header:", SourceClientNativeHeader, ConfidenceHigh)
 	appendHeader("X-Session-Affinity", "affinity:", SourceClientNativeHeader, ConfidenceHigh)
-	appendHeader("X-Client-Request-Id", "clientreq:", SourceClientRequestID, ConfidenceMedium)
+	// OpenCode gives a sub-agent its own X-Session-Id and puts the root session in
+	// X-Parent-Session-Id, the opposite of the Claude Code and Codex convention.
+	// Collecting the parent under the same "header:" prefix as X-Session-Id makes a
+	// child request join the parent's alias group, so sub-agents reuse the parent's
+	// credential instead of being routed as an unrelated session.
+	appendHeader("X-Parent-Session-Id", "header:", SourceClientNativeHeader, ConfidenceHigh)
 
 	if len(payload) == 0 {
-		return signals
+		return appendClientRequestFallback(signals, headers)
 	}
 	for _, path := range []string{"session_id", "sessionId"} {
 		if sid := NormalizeExplicitID(gjson.GetBytes(payload, path).String()); sid != "" {
@@ -173,7 +235,27 @@ func extractExplicitRootSignals(headers http.Header, payload []byte) []rawSignal
 	if sid := NormalizeExplicitID(gjson.GetBytes(payload, "conversation_id").String()); sid != "" {
 		signals = append(signals, rawSignal{"conv:" + sid, SourceBodyConversation, ConfidenceHigh, ScopeSession})
 	}
-	return signals
+	return appendClientRequestFallback(signals, headers)
+}
+
+// appendClientRequestFallback uses X-Client-Request-Id only when the request
+// carries no other explicit root identifier.
+//
+// The header tracks the current thread rather than the root session: a Codex
+// sub-agent sends its own thread identifier there while session-id stays on the
+// root. Collecting it unconditionally would add one throwaway alias per sub-agent
+// to the root alias group. Every observed client that sends it also sends
+// session-id or prompt_cache_key with the same value, so it is only reached by a
+// client that sends nothing else, where it is the one signal available.
+func appendClientRequestFallback(signals []rawSignal, headers http.Header) []rawSignal {
+	if len(signals) > 0 {
+		return signals
+	}
+	sid := HeaderValue(headers, "X-Client-Request-Id")
+	if sid == "" {
+		return signals
+	}
+	return append(signals, rawSignal{"clientreq:" + sid, SourceClientRequestID, ConfidenceMedium, ScopeSession})
 }
 
 func clientIdentity(id, source, confidence, scope string) Identity {

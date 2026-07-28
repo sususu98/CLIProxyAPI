@@ -1014,32 +1014,41 @@ func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
+// TestExtractSessionID_ClientRequestIDHeaderIsLastResort verifies the header still
+// provides affinity for a client that sends nothing else, while never competing
+// with a real root identifier. Live captures show it follows the current thread: a
+// Codex sub-agent sends its own thread identifier there while session-id stays on
+// the root, so it must not join the root alias group when a root exists.
+func TestExtractSessionID_ClientRequestIDHeaderIsLastResort(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
 	headers.Set("X-Client-Request-Id", "pi-session-123")
 
-	got := ExtractSessionID(headers, nil, nil)
-	want := "clientreq:pi-session-123"
-	if got != want {
-		t.Errorf("ExtractSessionID() with X-Client-Request-Id = %q, want %q", got, want)
+	if got := ExtractSessionID(headers, nil, nil); got != "clientreq:pi-session-123" {
+		t.Errorf("ExtractSessionID() with only X-Client-Request-Id = %q, want clientreq:pi-session-123", got)
 	}
 }
 
-func TestExtractSessionIDUsesCodexAsRepresentativeWithClientRequestAlias(t *testing.T) {
+// TestExtractSessionIDKeepsThreadIdentifiersOutOfTheAliasGroup mirrors a captured
+// Codex sub-agent turn, where x-client-request-id carries the child thread. The
+// alias group must stay the root session only, otherwise every sub-agent adds a
+// throwaway alias to it.
+func TestExtractSessionIDKeepsThreadIdentifiersOutOfTheAliasGroup(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
-	headers.Set("X-Client-Request-Id", "pi-session-123")
+	headers.Set("X-Client-Request-Id", "child-thread-123")
 	headers.Set("Session_id", "codex-session-456")
 
 	identity := cliproxysession.Extract(headers, nil, nil)
 	if identity.ID != "codex:codex-session-456" {
 		t.Errorf("identity.ID = %q, want Codex representative", identity.ID)
 	}
-	if !containsString(identity.Aliases, "clientreq:pi-session-123") {
-		t.Fatalf("identity.Aliases = %#v, want client request alias", identity.Aliases)
+	for _, id := range identity.IDs() {
+		if strings.Contains(id, "child-thread-123") {
+			t.Fatalf("identity.IDs() = %#v, want no thread identifier", identity.IDs())
+		}
 	}
 }
 
@@ -1442,6 +1451,63 @@ func TestSessionAffinitySelectorReusesExistingGenericAlias(t *testing.T) {
 	}
 	if pick4.ID != pick1.ID {
 		t.Fatalf("body-only request changed auth from %q to %q", pick1.ID, pick4.ID)
+	}
+}
+
+// TestSessionAffinitySelectorOpenCodeSubagentReusesParentAuth covers the captured
+// OpenCode convention: a sub-agent gets its own X-Session-Id and reports the root
+// in X-Parent-Session-Id. Without reading the parent header the child looks like an
+// unrelated session and lands on a different credential, losing the parent's cache.
+func TestSessionAffinitySelectorOpenCodeSubagentReusesParentAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "test-opencode-subagent"
+	userAgent := "opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-Id":       {"ses_root"},
+			"X-Session-Affinity": {"ses_root"},
+			"User-Agent":         {userAgent},
+		},
+	}
+	parentPick, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent Pick() error = %v", err)
+	}
+
+	// Two concurrent sub-agents must both land on the parent's credential.
+	for _, child := range []string{"ses_child_a", "ses_child_b"} {
+		childOpts := cliproxyexecutor.Options{
+			Headers: http.Header{
+				"X-Session-Id":        {child},
+				"X-Session-Affinity":  {child},
+				"X-Parent-Session-Id": {"ses_root"},
+				"User-Agent":          {userAgent},
+			},
+		}
+		childPick, errChild := selector.Pick(context.Background(), provider, "gpt-test", childOpts, auths)
+		if errChild != nil {
+			t.Fatalf("subagent %s Pick() error = %v", child, errChild)
+		}
+		if childPick.ID != parentPick.ID {
+			t.Fatalf("subagent %s picked auth %q, want the parent auth %q", child, childPick.ID, parentPick.ID)
+		}
+	}
+
+	// The parent keeps its binding after the sub-agents joined the alias group.
+	parentAgain, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent re-Pick() error = %v", err)
+	}
+	if parentAgain.ID != parentPick.ID {
+		t.Fatalf("parent auth changed from %q to %q after subagents bound", parentPick.ID, parentAgain.ID)
 	}
 }
 
@@ -2275,12 +2341,13 @@ func TestExtractSessionIDNativeSignalsRepresentativeID(t *testing.T) {
 			want:    "pck:shared-cache-bucket",
 		},
 		{
-			name: "client request id representative before body session",
+			// A real root identifier wins, so the body prompt_cache_key stays representative.
+			name: "client request id does not outrank the body prompt cache key",
 			headers: http.Header{
 				"X-Client-Request-Id": []string{"client-session"},
 			},
 			payload: `{"prompt_cache_key":"prompt-session","conversation":{"id":"conversation-session"}}`,
-			want:    "clientreq:client-session",
+			want:    "pck:prompt-session",
 		},
 	}
 
@@ -2410,5 +2477,84 @@ func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *
 	}
 	if second.ID != first.ID {
 		t.Fatalf("request-only conversation changed auth from %q to %q", first.ID, second.ID)
+	}
+}
+
+// TestSessionAffinitySelectorManySubagentsKeepParentBinding covers the interaction
+// between the OpenCode parent alias and maxStableSessionAliases. Every sub-agent
+// adds two identifiers to the parent's alias group, so a long-lived session can
+// exceed the per-group alias cap. The parent must not be rebound when that happens,
+// and an early sub-agent whose own aliases were squeezed out must still resolve.
+func TestSessionAffinitySelectorManySubagentsKeepParentBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	provider := "test-opencode-many-subagents"
+	userAgent := "opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+	openCodeOpts := func(session, parent string) cliproxyexecutor.Options {
+		headers := http.Header{
+			"X-Session-Id":       {session},
+			"X-Session-Affinity": {session},
+			"User-Agent":         {userAgent},
+		}
+		if parent != "" {
+			headers.Set("X-Parent-Session-Id", parent)
+		}
+		return cliproxyexecutor.Options{Headers: headers}
+	}
+
+	parentOpts := openCodeOpts("ses_root", "")
+	parentPick, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent Pick() error = %v", err)
+	}
+
+	// Well past maxStableSessionAliases worth of sub-agent identifiers.
+	const subagents = 60
+	for index := 0; index < subagents; index++ {
+		child := fmt.Sprintf("ses_child_%02d", index)
+		pick, errChild := selector.Pick(context.Background(), provider, "gpt-test", openCodeOpts(child, "ses_root"), auths)
+		if errChild != nil {
+			t.Fatalf("subagent #%d Pick() error = %v", index, errChild)
+		}
+		if pick.ID != parentPick.ID {
+			t.Fatalf("subagent #%d picked auth %q, want the parent auth %q", index, pick.ID, parentPick.ID)
+		}
+	}
+
+	parentAgain, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent re-Pick() error = %v", err)
+	}
+	if parentAgain.ID != parentPick.ID {
+		t.Fatalf("parent auth changed from %q to %q after %d subagents", parentPick.ID, parentAgain.ID, subagents)
+	}
+
+	// The first sub-agent's own identifiers were squeezed out of the group, but it
+	// still sends the parent header, so it resolves back to the same credential.
+	earlyPick, err := selector.Pick(context.Background(), provider, "gpt-test", openCodeOpts("ses_child_00", "ses_root"), auths)
+	if err != nil {
+		t.Fatalf("early subagent Pick() error = %v", err)
+	}
+	if earlyPick.ID != parentPick.ID {
+		t.Fatalf("early subagent picked auth %q, want the parent auth %q", earlyPick.ID, parentPick.ID)
+	}
+
+	// An unrelated session must stay a separate alias group.
+	otherPick, err := selector.Pick(context.Background(), provider, "gpt-test", openCodeOpts("ses_other_root", ""), auths)
+	if err != nil {
+		t.Fatalf("unrelated session Pick() error = %v", err)
+	}
+	if otherPick.ID == parentPick.ID {
+		t.Fatalf("unrelated session shares auth %q with the parent group", otherPick.ID)
+	}
+	if stats := selector.cache.Stats(); stats.Groups != 2 {
+		t.Fatalf("cache groups = %d, want 2 distinct sessions (stats %+v)", stats.Groups, stats)
 	}
 }

@@ -37,6 +37,18 @@ func TestDetectClientType(t *testing.T) {
 			want:    "",
 		},
 		{
+			// Background requests report cli-bg. With a stripped User-Agent the
+			// X-App/Anthropic-Beta pair is one of only two available signals, so a
+			// strict "cli" comparison would drop detection to a single signal.
+			name: "claude code background requests report cli-bg",
+			headers: http.Header{
+				"X-App":                    {"cli-bg"},
+				"Anthropic-Beta":           {"claude-code-20250219"},
+				"X-Claude-Code-Session-Id": {"11111111-1111-4111-8111-111111111111"},
+			},
+			want: ClientTypeClaudeCode,
+		},
+		{
 			name: "anthropic sdk is not claude code",
 			headers: http.Header{
 				"User-Agent":        {"Anthropic/Python 0.40.0"},

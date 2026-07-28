@@ -40,6 +40,48 @@ func (d *sessionAliasCaptureDispatcher) sessionIDs() []string {
 	return append([]string(nil), d.sessions...)
 }
 
+// TestHomeDispatchSessionCarriesObservations verifies the observation fields reach
+// Home. Home builds session timelines from this payload and cannot re-derive them,
+// because the RESP auth dispatch never sees the original request body or headers.
+func TestHomeDispatchSessionCarriesObservations(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+
+	const root = "019fa90b-31a4-7841-b252-0a2d5dafbbdc"
+	const childThread = "019fa90b-3219-73d2-9aad-9de97611969e"
+	const turnID = "019fa90b-3234-73d2-a061-0622e5f8c57c"
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"Session-Id":               {root},
+			"Thread-Id":                {childThread},
+			"X-Codex-Parent-Thread-Id": {root},
+			"X-Codex-Turn-Metadata": {`{"session_id":"` + root + `","thread_id":"` + childThread +
+				`","turn_id":"` + turnID + `","request_kind":"compact","thread_source":"subagent"}`},
+			"User-Agent": {"codex_exec/0.145.0 (Mac OS 26.5.2; arm64)"},
+		},
+	}
+
+	session := manager.homeDispatchSession(opts)
+	if session.ID != "codex:"+root {
+		t.Fatalf("session.ID = %q, want codex:%s", session.ID, root)
+	}
+	for _, tc := range []struct{ name, got, want string }{
+		{"RequestKind", session.RequestKind, "compact"},
+		{"ThreadSource", session.ThreadSource, "subagent"},
+		{"TurnID", session.TurnID, turnID},
+		{"ThreadID", session.ThreadID, childThread},
+		{"ParentThreadID", session.ParentThreadID, root},
+		{"ClientType", session.ClientType, "codex"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("session.%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
 func TestHomeSessionAliasCacheClearsWhenConfiguredTTLChanges(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{

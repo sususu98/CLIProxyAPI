@@ -897,6 +897,9 @@ func sessionInfoFromOptions(opts cliproxyexecutor.Options) coreusage.SessionInfo
 		ClientType:     identity.ClientType,
 		ThreadID:       identity.ThreadID,
 		ParentThreadID: identity.ParentThreadID,
+		RequestKind:    identity.RequestKind,
+		ThreadSource:   identity.ThreadSource,
+		TurnID:         identity.TurnID,
 	}
 }
 

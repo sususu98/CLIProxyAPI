@@ -157,6 +157,9 @@ func sessionInfoFromHomeDispatch(session home.DispatchSession) coreusage.Session
 		ClientType:     session.ClientType,
 		ThreadID:       session.ThreadID,
 		ParentThreadID: session.ParentThreadID,
+		RequestKind:    session.RequestKind,
+		ThreadSource:   session.ThreadSource,
+		TurnID:         session.TurnID,
 	}
 }
 

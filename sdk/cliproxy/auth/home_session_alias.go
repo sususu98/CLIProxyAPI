@@ -279,6 +279,9 @@ func (m *Manager) homeDispatchSession(opts cliproxyexecutor.Options) home.Dispat
 		ClientType:     identity.ClientType,
 		ThreadID:       identity.ThreadID,
 		ParentThreadID: identity.ParentThreadID,
+		RequestKind:    identity.RequestKind,
+		ThreadSource:   identity.ThreadSource,
+		TurnID:         identity.TurnID,
 		ClientProvided: identity.ClientProvided,
 	}
 	if session.ID == "" || m == nil {
