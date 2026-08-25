@@ -29,12 +29,16 @@ var imageOnlyBuiltinModelIDs = map[string]struct{}{
 	xaiBuiltinImage20ModelID:      {},
 }
 
-// IsImageOnlyModel reports whether modelID is a built-in image-only model.
-// Callers must pass a bare model ID: provider prefixes and thinking suffixes are
-// not stripped here.
+// IsImageOnlyModel reports whether modelID is a built-in or dynamically
+// registered image-only model. Callers must pass a bare model ID: provider
+// prefixes and thinking suffixes are not stripped here.
 func IsImageOnlyModel(modelID string) bool {
-	_, ok := imageOnlyBuiltinModelIDs[strings.ToLower(strings.TrimSpace(modelID))]
-	return ok
+	trimmedModelID := strings.TrimSpace(modelID)
+	if _, ok := imageOnlyBuiltinModelIDs[strings.ToLower(trimmedModelID)]; ok {
+		return true
+	}
+	info := LookupModelInfo(trimmedModelID)
+	return info != nil && info.Type == OpenAIImageModelType
 }
 
 // staticModelsJSON mirrors the top-level structure of models.json.

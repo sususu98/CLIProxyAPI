@@ -165,8 +165,19 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 
 func TestGetRequestDetails_ImageModelReturns400(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	modelRegistry := registry.GetGlobalRegistry()
+	const dynamicImageModelClientID = "test-request-details-dynamic-image-client"
+	const dynamicImageModelID = "test-request-details-dynamic-image-model"
+	modelRegistry.RegisterClient(dynamicImageModelClientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:   dynamicImageModelID,
+		Type: registry.OpenAIImageModelType,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(dynamicImageModelClientID)
+	})
 
 	imageOnlyModels := []string{
+		dynamicImageModelID,
 		"gpt-image-1.5",
 		"gpt-image-2",
 		"codex/gpt-image-2",

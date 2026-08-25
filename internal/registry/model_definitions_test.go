@@ -116,6 +116,20 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 }
 
 func TestIsImageOnlyModel(t *testing.T) {
+	modelRegistry := GetGlobalRegistry()
+	const dynamicImageModelID = "registry-dynamic-image-model"
+	modelRegistry.RegisterClient("registry-dynamic-image-client", "openai-compatibility", []*ModelInfo{{
+		ID:   dynamicImageModelID,
+		Type: OpenAIImageModelType,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("registry-dynamic-image-client")
+	})
+
+	if !IsImageOnlyModel(dynamicImageModelID) {
+		t.Fatalf("IsImageOnlyModel(%q) = false, want true", dynamicImageModelID)
+	}
+
 	for _, id := range []string{
 		codexBuiltinImage15ModelID,
 		codexBuiltinImageModelID,
