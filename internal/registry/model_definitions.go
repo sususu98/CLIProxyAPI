@@ -17,6 +17,26 @@ const (
 	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
 )
 
+// imageOnlyBuiltinModelIDs lists the built-in models that can only be served by
+// the image endpoints (/v1/images/generations and /v1/images/edits). It is keyed
+// off the same constants used to register the built-ins, so a new image model is
+// declared in exactly one place.
+var imageOnlyBuiltinModelIDs = map[string]struct{}{
+	codexBuiltinImage15ModelID:    {},
+	codexBuiltinImageModelID:      {},
+	xaiBuiltinImageModelID:        {},
+	xaiBuiltinImageQualityModelID: {},
+	xaiBuiltinImage20ModelID:      {},
+}
+
+// IsImageOnlyModel reports whether modelID is a built-in image-only model.
+// Callers must pass a bare model ID: provider prefixes and thinking suffixes are
+// not stripped here.
+func IsImageOnlyModel(modelID string) bool {
+	_, ok := imageOnlyBuiltinModelIDs[strings.ToLower(strings.TrimSpace(modelID))]
+	return ok
+}
+
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
 	Claude      []*ModelInfo `json:"claude"`
