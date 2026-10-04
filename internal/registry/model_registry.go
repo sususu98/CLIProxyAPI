@@ -86,7 +86,7 @@ type ModelInfo struct {
 	SupportConfigurationUpdate bool `json:"-"`
 
 	// NativeCapabilities contains internal, static per-model capability metadata.
-	// It is separate from the legacy SupportsWebSearch flag.
+	// For Antigravity, an explicit WebSearch value overrides SupportsWebSearch.
 	NativeCapabilities *NativeCapabilities `json:"-"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.

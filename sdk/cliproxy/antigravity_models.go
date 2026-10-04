@@ -87,6 +87,8 @@ type antigravityFetchAvailableModelsResponse struct {
 	Models map[string]json.RawMessage `json:"models"`
 }
 
+// antigravityModelCapabilityHints carries per-account model entitlements only.
+// Model capabilities such as native web search come from the static catalog.
 type antigravityModelCapabilityHints struct {
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
 	ModelIDs map[string]struct{}
@@ -400,6 +402,13 @@ func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabili
 	return filtered
 }
 
+func (s *Service) antigravityCatalogModels() []*ModelInfo {
+	if s != nil && s.antigravityCatalog != nil {
+		return s.antigravityCatalog()
+	}
+	return registry.GetAntigravityModels()
+}
+
 func (s *Service) antigravityModelsForHints(auth *coreauth.Auth, hints antigravityModelCapabilityHints) []*ModelInfo {
 	s.cfgMu.RLock()
 	cfg := s.cfg
@@ -411,7 +420,7 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
+	models := filterAntigravityModels(s.antigravityCatalogModels(), hints)
 	// Search capabilities come exclusively from models.json, never account probes.
 	excluded := cfg.OAuthExcludedModels[coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())]
 	if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
@@ -456,32 +465,28 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 			return
 		}
 	}
-	var updated bool
-	if hints.ModelIDs != nil {
-		// Keep the config snapshot stable through publication. Registry CAS must
-		// remain strict: an epoch from another publisher may use newer auth settings.
-		s.cfgMu.RLock()
-		models := s.antigravityModelsForHintsWithConfig(auth, hints, s.cfg)
-		// Fence the cache-to-registry publication as well as the network result.
-		// A newer successful catalog must never be replaced by an older caller.
-		antigravityCapabilityMu.Lock()
-		entry := antigravityCapabilityCache[expectedKey]
-		if entry.hints.revision != hints.revision {
-			antigravityCapabilityMu.Unlock()
-			s.cfgMu.RUnlock()
-			return
-		}
-		reg := registry.GetGlobalRegistry()
-		var appliedEpoch uint64
-		appliedEpoch, updated = reg.ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models)
-		if updated {
-			entry.appliedRevision = hints.revision
-			entry.appliedEpoch = appliedEpoch
-			antigravityCapabilityCache[expectedKey] = entry
-		}
+	// Keep the config snapshot stable through publication. Registry CAS must
+	// remain strict: an epoch from another publisher may use newer auth settings.
+	s.cfgMu.RLock()
+	models := s.antigravityModelsForHintsWithConfig(auth, hints, s.cfg)
+	// Fence the cache-to-registry publication as well as the network result.
+	// A newer successful catalog must never be replaced by an older caller.
+	antigravityCapabilityMu.Lock()
+	entry := antigravityCapabilityCache[expectedKey]
+	if entry.hints.revision != hints.revision {
 		antigravityCapabilityMu.Unlock()
 		s.cfgMu.RUnlock()
+		return
 	}
+	reg := registry.GetGlobalRegistry()
+	appliedEpoch, updated := reg.ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models)
+	if updated {
+		entry.appliedRevision = hints.revision
+		entry.appliedEpoch = appliedEpoch
+		antigravityCapabilityCache[expectedKey] = entry
+	}
+	antigravityCapabilityMu.Unlock()
+	s.cfgMu.RUnlock()
 	if updated && s.coreManager != nil {
 		s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
 		s.coreManager.RefreshSchedulerEntry(auth.ID)

@@ -9,69 +9,93 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+const (
+	searchFixtureLegacy = "fixture-search-legacy"
+	searchFixtureNative = "fixture-search-native"
+	searchFixtureVeto   = "fixture-search-veto"
+	searchFixtureNone   = "fixture-search-none"
+)
+
+// antigravitySearchFixtureCatalog covers every combination of the two catalog
+// search fields without depending on production models.json entries.
+func antigravitySearchFixtureCatalog() []*ModelInfo {
+	enabled, disabled := true, false
+	return []*ModelInfo{
+		{ID: searchFixtureLegacy, Object: "model", SupportsWebSearch: true},
+		{ID: searchFixtureNative, Object: "model", NativeCapabilities: &registry.NativeCapabilities{WebSearch: &enabled}},
+		{ID: searchFixtureVeto, Object: "model", SupportsWebSearch: true, NativeCapabilities: &registry.NativeCapabilities{WebSearch: &disabled}},
+		{ID: searchFixtureNone, Object: "model"},
+	}
+}
+
+func searchFixtureWant(modelID string) bool {
+	return modelID == searchFixtureLegacy || modelID == searchFixtureNative
+}
+
 // A valid catalog must publish normally; fencing tests use the same response shape.
 func TestAntigravityAsyncProbe_ValidCatalogPublishesWithoutSearchHints(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
+		_, _ = w.Write([]byte(`{"models":{"` + searchFixtureNative + `":{}}}`))
 	}))
 	defer server.Close()
-	svc := &Service{cfg: &config.Config{}}
+	svc := &Service{cfg: &config.Config{}, antigravityCatalog: antigravitySearchFixtureCatalog}
 	auth := antigravityTestAuth("valid-catalog-no-search", server.URL)
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
 	svc.registerModelsForAuth(t.Context(), auth)
 	svc.WaitAntigravityProbes()
 	models := GlobalModelRegistry().GetModelsForClient(auth.ID)
-	if len(models) != 1 || models[0].ID != "gemini-3.1-flash-lite" || !models[0].SupportsWebSearch {
+	if len(models) != 1 || models[0].ID != searchFixtureNative || !registry.AntigravityModelSupportsWebSearch(models[0]) {
 		t.Fatalf("valid catalog did not publish with static search capability: %+v", models)
 	}
 }
 
 func TestAntigravitySearchCapabilitiesComeFromCatalog(t *testing.T) {
-	const searchable = "gemini-3.1-flash-lite"
-	const unsearchable = "claude-opus-4-6-thinking"
-	definitions := make(map[string]*ModelInfo)
-	for _, model := range registry.GetAntigravityModels() {
-		definitions[model.ID] = model
+	aliases := []config.OAuthModelAlias{
+		{Name: searchFixtureLegacy, Alias: "alias-legacy"},
+		{Name: searchFixtureNative, Alias: "alias-native"},
+		{Name: searchFixtureVeto, Alias: "alias-veto"},
+		{Name: searchFixtureNone, Alias: "alias-none"},
 	}
-	if definitions[searchable] == nil || !definitions[searchable].SupportsWebSearch || definitions[unsearchable] == nil || definitions[unsearchable].SupportsWebSearch {
-		t.Fatal("expected searchable Gemini and unsearchable Claude catalog fixtures")
+	svc := &Service{
+		cfg:                &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{"antigravity": aliases}},
+		antigravityCatalog: antigravitySearchFixtureCatalog,
 	}
-	svc := &Service{cfg: &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
-		"antigravity": {{Name: searchable, Alias: "search-alias"}, {Name: unsearchable, Alias: "no-search-alias"}},
-	}}}
 	auth := antigravityTestAuth("catalog-search", "http://127.0.0.1:1")
 	auth.Prefix = "tenant"
+	aliasTargets := map[string]string{}
+	for _, alias := range aliases {
+		aliasTargets[alias.Alias] = alias.Name
+		aliasTargets["tenant/"+alias.Alias] = alias.Name
+	}
+	const entitled = `"fixture-search-legacy":{},"fixture-search-native":{},"fixture-search-veto":{},"fixture-search-none":{}`
 	for _, tc := range []struct{ name, body string }{
-		{"absent", `{"models":{"gemini-3.1-flash-lite":{},"claude-opus-4-6-thinking":{}}}`},
-		{"empty", `{"models":{"gemini-3.1-flash-lite":{},"claude-opus-4-6-thinking":{}},"webSearchModelIds":[]}`},
-		{"contradictory", `{"models":{"gemini-3.1-flash-lite":{},"claude-opus-4-6-thinking":{}},"webSearchModelIds":["claude-opus-4-6-thinking"]}`},
-		{"malformed-ignored-field", `{"models":{"gemini-3.1-flash-lite":{},"claude-opus-4-6-thinking":{}},"webSearchModelIds":42}`},
+		{"absent", `{"models":{` + entitled + `}}`},
+		{"empty", `{"models":{` + entitled + `},"webSearchModelIds":[]}`},
+		{"contradictory", `{"models":{` + entitled + `},"webSearchModelIds":["fixture-search-none","fixture-search-veto"]}`},
+		{"malformed-ignored-field", `{"models":{` + entitled + `},"webSearchModelIds":42}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hints, ok := parseAntigravityModelCapabilityHints([]byte(tc.body))
-			if !ok || len(hints.ModelIDs) != 2 {
+			if !ok || len(hints.ModelIDs) != 4 {
 				t.Fatalf("entitlements not parsed: %+v", hints)
 			}
 			models := svc.antigravityModelsForHints(auth, hints)
-			if len(models) != 4 {
-				t.Fatalf("expected aliases and prefixes, got %+v", models)
+			if len(models) != 8 {
+				t.Fatalf("expected aliases and prefixes for every fixture, got %+v", models)
 			}
 			for _, model := range models {
-				want := false
-				switch model.ID {
-				case "search-alias", "tenant/search-alias":
-					want = true
-				case "no-search-alias", "tenant/no-search-alias":
-				default:
+				target, ok := aliasTargets[model.ID]
+				if !ok {
 					t.Fatalf("unexpected model %q", model.ID)
 				}
-				if model.SupportsWebSearch != want {
-					t.Fatalf("%s search=%v, want catalog value %v", model.ID, model.SupportsWebSearch, want)
+				want := searchFixtureWant(target)
+				if got := registry.AntigravityModelSupportsWebSearch(model); got != want {
+					t.Fatalf("%s search=%v, want catalog value %v (supports=%v native=%+v)", model.ID, got, want, model.SupportsWebSearch, model.NativeCapabilities)
 				}
 			}
 		})
 	}
-	hints, ok := parseAntigravityModelCapabilityHints([]byte(`{"webSearchModelIds":["gemini-3.1-flash-lite"]}`))
+	hints, ok := parseAntigravityModelCapabilityHints([]byte(`{"webSearchModelIds":["fixture-search-none"]}`))
 	if !ok || hints.ModelIDs != nil {
 		t.Fatal("search-only response granted model entitlements")
 	}
