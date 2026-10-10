@@ -172,8 +172,19 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	if merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 {
 		merged.CacheReadTokens = existing.CacheReadTokens
 	}
-	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
+	if !merged.CacheCreationTokensPresent && merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
 		merged.CacheCreationTokens = existing.CacheCreationTokens
+		merged.CacheCreationTokensPresent = existing.CacheCreationTokensPresent
+	}
+	if update.CacheCreationTokensPresent && merged.CacheCreationTokens == 0 && merged.CacheReadTokens == 0 {
+		// Do not retain the legacy cached=creation alias after an explicit zero write.
+		merged.CachedTokens = 0
+	}
+	// A split from an earlier frame only remains valid while the aggregate is unchanged.
+	if merged.CacheCreationDetail == nil && existing.CacheCreationDetail != nil &&
+		merged.CacheCreationTokens == existing.CacheCreationTokens {
+		copied := *existing.CacheCreationDetail
+		merged.CacheCreationDetail = &copied
 	}
 	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
 		merged.OutputTokens = existing.OutputTokens
