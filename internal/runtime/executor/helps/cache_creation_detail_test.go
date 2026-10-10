@@ -42,7 +42,7 @@ func TestClaudeCacheCreationDetailIterations(t *testing.T) {
 }
 
 // Verify mixed-TTL usage across a server-side tool loop.
-func TestClaudeCacheCreationLiveToolLoop(t *testing.T) {
+func TestClaudeCacheCreationToolLoopStream(t *testing.T) {
 	const payload = `data: {"type":"message_start","message":{"usage":{"input_tokens":4,"cache_creation_input_tokens":2962,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2962},"output_tokens":16}}}
 data: {"type":"message_delta","usage":{"input_tokens":6,"cache_creation_input_tokens":11193,"cache_read_input_tokens":2962,"output_tokens":89,"iterations":[{"type":"message","cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2962}},{"type":"message","cache_creation":{"ephemeral_5m_input_tokens":8231,"ephemeral_1h_input_tokens":0}}]}}`
 	var buffer StreamUsageBuffer
@@ -58,13 +58,18 @@ data: {"type":"message_delta","usage":{"input_tokens":6,"cache_creation_input_to
 	}
 }
 
-func TestClaudeStreamCacheCreationExplicitZero(t *testing.T) {
+// Zero counters in a later delta are treated like the sibling input/cache-read
+// counters: they do not erase usage already reported by message_start.
+func TestClaudeStreamCacheCreationZeroDeltaKeepsStartUsage(t *testing.T) {
 	var buffer StreamUsageBuffer
-	buffer.ObserveClaudeStream([]byte(`data: {"message":{"usage":{"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":100}}}}`))
-	buffer.ObserveClaudeStream([]byte(`data: {"usage":{"cache_creation_input_tokens":0,"output_tokens":10}}`))
+	buffer.ObserveClaudeStream([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":4,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":100}}}}`))
+	buffer.ObserveClaudeStream([]byte(`data: {"type":"message_delta","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}`))
 	detail, _ := buffer.Detail()
-	if detail.CacheCreationTokens != 0 || detail.CacheCreationDetail != nil || detail.TotalTokens != 10 {
-		t.Fatalf("explicit zero must clear creation and stale detail: %+v", detail)
+	if detail.CacheCreationTokens != 100 || detail.CachedTokens != 100 || detail.TotalTokens != 114 {
+		t.Fatalf("zero delta must keep start usage: %+v", detail)
+	}
+	if detail.CacheCreationDetail == nil || detail.CacheCreationDetail.Ephemeral1hInputTokens != 100 {
+		t.Fatalf("zero delta must keep start split: %+v", detail.CacheCreationDetail)
 	}
 }
 

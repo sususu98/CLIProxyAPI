@@ -1140,14 +1140,13 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		nonReasoningOutput = 0
 	}
 	detail := usage.Detail{
-		InputTokens:                usageNode.Get("input_tokens").Int(),
-		OutputTokens:               rawOutputTokens,
-		ReasoningTokens:            reasoningTokens,
-		CachedTokens:               cacheReadTokens,
-		CacheReadTokens:            cacheReadTokens,
-		CacheCreationTokens:        cacheCreationTokens,
-		CacheCreationTokensPresent: usageNode.Get("cache_creation_input_tokens").Type == gjson.Number,
-		CacheCreationDetail:        claudeCacheCreationDetail(usageNode),
+		InputTokens:         usageNode.Get("input_tokens").Int(),
+		OutputTokens:        rawOutputTokens,
+		ReasoningTokens:     reasoningTokens,
+		CachedTokens:        cacheReadTokens,
+		CacheReadTokens:     cacheReadTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		CacheCreationDetail: claudeCacheCreationDetail(usageNode),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -1185,6 +1184,8 @@ func claudeCacheCreationDetail(usageNode gjson.Result) *usage.CacheCreationDetai
 
 	var detail *usage.CacheCreationDetail
 	if node := usageNode.Get("cache_creation"); node.Exists() && node.Type != gjson.Null {
+		// The documented top-level split is authoritative; if it is malformed,
+		// report no split instead of mixing it with per-iteration data.
 		detail = readSplit(node)
 	} else {
 		iterations := usageNode.Get("iterations").Array()

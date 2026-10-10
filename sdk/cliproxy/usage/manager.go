@@ -90,9 +90,6 @@ type Detail struct {
 	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
-	// CacheCreationTokensPresent distinguishes an explicit upstream zero from
-	// an omitted counter when merging partial Claude streaming usage.
-	CacheCreationTokensPresent bool
 	// CacheCreationDetail preserves the 5-minute and 1-hour cache-write split
 	// when the upstream reports it. The aggregate CacheCreationTokens stays unchanged.
 	CacheCreationDetail *CacheCreationDetail

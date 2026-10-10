@@ -11,8 +11,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
-// Replay sanitized upstream usage from the local-cpa web-search curl probe.
-func TestLiveClaudeCacheCreationDetailReporting(t *testing.T) {
+// Replay a sanitized Claude tool-loop stream and verify the Redis payload.
+func TestClaudeCacheCreationDetailReachesRedisPayload(t *testing.T) {
 	const payload = `data: {"type":"message_start","message":{"usage":{"input_tokens":4,"cache_creation_input_tokens":2962,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2962},"output_tokens":16}}}
 data: {"type":"message_delta","usage":{"input_tokens":6,"cache_creation_input_tokens":11193,"cache_read_input_tokens":2962,"output_tokens":89,"iterations":[{"type":"message","cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2962}},{"type":"message","cache_creation":{"ephemeral_5m_input_tokens":8231,"ephemeral_1h_input_tokens":0}}]}}`
 	prevEnabled, prevUsage := redisqueue.Enabled(), redisqueue.UsageStatisticsEnabled()
